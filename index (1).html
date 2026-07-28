@@ -1,0 +1,753 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Reports Generator</title>
+<meta name="description" content="Upload an Excel workbook, preview the data, generate a summary report and download an enhanced .xlsx file." />
+<script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+<style>
+  :root {
+    --green-50:  #f0fdf4;
+    --green-100: #dcfce7;
+    --green-200: #bbf7d0;
+    --green-500: #22c55e;
+    --green-600: #16a34a;
+    --green-700: #15803d;
+    --green-800: #166534;
+
+    --bg:        #f6f8f7;
+    --surface:   #ffffff;
+    --surface-2: #fafbfa;
+    --border:    #e3e8e5;
+    --text:      #16211b;
+    --muted:     #67766e;
+    --shadow:    0 1px 2px rgba(16, 33, 24, .04), 0 8px 24px rgba(16, 33, 24, .06);
+    --radius:    14px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:        #0e1411;
+      --surface:   #151c18;
+      --surface-2: #1a221d;
+      --border:    #263029;
+      --text:      #e8efea;
+      --muted:     #9aa8a0;
+      --green-50:  #0f1f16;
+      --green-100: #14301f;
+      --green-200: #1b4029;
+      --shadow:    0 1px 2px rgba(0, 0, 0, .3), 0 8px 24px rgba(0, 0, 0, .35);
+    }
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 20px 64px; }
+
+  /* ---------- header ---------- */
+  header {
+    background: linear-gradient(135deg, var(--green-700), var(--green-600) 55%, var(--green-500));
+    color: #fff;
+    padding: 34px 0 30px;
+    margin-bottom: 26px;
+  }
+  header .wrap { padding-bottom: 0; }
+  .brand { display: flex; align-items: center; gap: 13px; }
+  .brand .logo {
+    width: 42px; height: 42px; flex: none;
+    display: grid; place-items: center;
+    background: rgba(255, 255, 255, .16);
+    border: 1px solid rgba(255, 255, 255, .25);
+    border-radius: 11px;
+  }
+  .brand h1 { font-size: 25px; margin: 0; font-weight: 650; letter-spacing: -.02em; }
+  .brand p { margin: 2px 0 0; font-size: 14px; opacity: .88; }
+
+  /* ---------- tabs ---------- */
+  .tabs {
+    display: flex; flex-wrap: wrap; gap: 6px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 6px;
+    box-shadow: var(--shadow);
+    margin-bottom: 22px;
+  }
+  .tabs button {
+    flex: 1 1 200px;
+    appearance: none;
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+    font: inherit;
+    font-size: 14px;
+    font-weight: 550;
+    padding: 11px 14px;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: background .15s, color .15s;
+    white-space: nowrap;
+  }
+  .tabs button:hover { background: var(--green-50); color: var(--green-700); }
+  .tabs button[aria-selected="true"] {
+    background: var(--green-600);
+    color: #fff;
+    box-shadow: 0 2px 8px rgba(22, 163, 74, .28);
+  }
+  .tabs button:focus-visible { outline: 2px solid var(--green-500); outline-offset: 2px; }
+
+  /* ---------- panels & cards ---------- */
+  .panel[hidden] { display: none; }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: 22px;
+    margin-bottom: 18px;
+  }
+  .card > h2 {
+    margin: 0 0 4px;
+    font-size: 17px;
+    font-weight: 650;
+    letter-spacing: -.01em;
+  }
+  .card > h2 + .sub { margin: 0 0 16px; color: var(--muted); font-size: 13.5px; }
+
+  /* ---------- dropzone ---------- */
+  .drop {
+    border: 2px dashed var(--border);
+    border-radius: 12px;
+    background: var(--surface-2);
+    padding: 34px 20px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color .15s, background .15s;
+  }
+  .drop:hover, .drop:focus-visible { border-color: var(--green-500); background: var(--green-50); outline: none; }
+  .drop.is-over { border-color: var(--green-600); background: var(--green-100); }
+  .drop .icon { font-size: 30px; line-height: 1; }
+  .drop .big { display: block; margin-top: 10px; font-weight: 600; font-size: 15px; }
+  .drop .small { display: block; margin-top: 4px; color: var(--muted); font-size: 13px; }
+  .drop input[type="file"] { display: none; }
+
+  .filebar {
+    display: none;
+    align-items: center;
+    gap: 10px;
+    margin-top: 14px;
+    padding: 10px 14px;
+    background: var(--green-50);
+    border: 1px solid var(--green-200);
+    border-radius: 10px;
+    font-size: 13.5px;
+  }
+  .filebar.show { display: flex; }
+  .filebar .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .filebar .meta { color: var(--muted); margin-left: auto; white-space: nowrap; }
+
+  /* ---------- buttons ---------- */
+  .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+  .btn {
+    appearance: none;
+    font: inherit;
+    font-size: 14px;
+    font-weight: 600;
+    padding: 10px 18px;
+    border-radius: 10px;
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: background .15s, border-color .15s, color .15s, opacity .15s;
+  }
+  .btn-primary { background: var(--green-600); color: #fff; }
+  .btn-primary:hover:not(:disabled) { background: var(--green-700); }
+  .btn-secondary { background: transparent; color: var(--green-700); border-color: var(--green-600); }
+  .btn-secondary:hover:not(:disabled) { background: var(--green-50); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn:focus-visible { outline: 2px solid var(--green-500); outline-offset: 2px; }
+
+  /* ---------- stats ---------- */
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 12px;
+    margin-bottom: 18px;
+  }
+  .stat {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--green-600);
+    border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .stat .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; font-weight: 600; }
+  .stat .value { font-size: 26px; font-weight: 680; letter-spacing: -.02em; margin-top: 2px; }
+
+  /* ---------- tables ---------- */
+  .table-scroll {
+    overflow: auto;
+    max-height: 460px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+  }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  thead th {
+    position: sticky; top: 0; z-index: 1;
+    background: var(--green-600);
+    color: #fff;
+    text-align: left;
+    font-weight: 600;
+    padding: 9px 12px;
+    white-space: nowrap;
+  }
+  tbody td {
+    padding: 8px 12px;
+    border-top: 1px solid var(--border);
+    white-space: nowrap;
+    max-width: 320px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  tbody tr:nth-child(even) { background: var(--surface-2); }
+  tbody tr:hover { background: var(--green-50); }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+  .hint { color: var(--muted); font-size: 12.5px; margin-top: 10px; }
+  .empty { color: var(--muted); font-size: 14px; padding: 26px 0; text-align: center; }
+
+  .alert {
+    display: none;
+    margin-top: 14px;
+    padding: 11px 14px;
+    border-radius: 10px;
+    font-size: 13.5px;
+    border: 1px solid #fca5a5;
+    background: #fef2f2;
+    color: #991b1b;
+  }
+  .alert.show { display: block; }
+  @media (prefers-color-scheme: dark) {
+    .alert { background: #2a1414; border-color: #6b2626; color: #fca5a5; }
+  }
+
+  footer { text-align: center; color: var(--muted); font-size: 13px; padding: 8px 0 0; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <div class="brand">
+      <div class="logo" aria-hidden="true">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 3v18h18" />
+          <rect x="7" y="11" width="3" height="7" fill="currentColor" stroke="none" />
+          <rect x="12.5" y="7" width="3" height="11" fill="currentColor" stroke="none" />
+          <rect x="18" y="4" width="3" height="14" fill="currentColor" stroke="none" />
+        </svg>
+      </div>
+      <div>
+        <h1>Reports Generator</h1>
+        <p>Upload an Excel workbook, review the data, and export an enhanced report.</p>
+      </div>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="tabs" role="tablist" aria-label="Report types" id="tablist"></div>
+  <div id="panels"></div>
+  <footer>Everything runs in your browser — no file ever leaves this device.</footer>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var TABS = [
+    { id: "casuals-detailed", title: "Casuals Detailed Report" },
+    { id: "fte-detailed",     title: "FTE Detailed Report" },
+    { id: "casual-summary",   title: "Casual Period Summary" },
+    { id: "fte-summary",      title: "FTE Period Summary" }
+  ];
+
+  var PREVIEW_ROWS = 100;
+
+  /* ------------------------------------------------------------------ *
+   * helpers
+   * ------------------------------------------------------------------ */
+
+  function el(tag, className, text) {
+    var node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  function isNumeric(value) {
+    return typeof value === "number" && isFinite(value);
+  }
+
+  function isBlank(value) {
+    return value === null || value === undefined || value === "";
+  }
+
+  function formatNumber(value) {
+    if (!isFinite(value)) return "";
+    return value.toLocaleString(undefined, { maximumFractionDigits: 4 });
+  }
+
+  function formatCell(value) {
+    if (isBlank(value)) return "";
+    if (value instanceof Date) return value.toISOString().slice(0, 10);
+    if (isNumeric(value)) return formatNumber(value);
+    return String(value);
+  }
+
+  function formatBytes(bytes) {
+    if (bytes < 1024) return bytes + " B";
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+    return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+  }
+
+  function slugify(text) {
+    return text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  }
+
+  /* ------------------------------------------------------------------ *
+   * report logic — shared placeholder for all four tabs
+   * ------------------------------------------------------------------ */
+
+  // A column is treated as numeric when it holds at least one value and every
+  // non-blank value in it is a finite number.
+  function findNumericColumns(headers, rows) {
+    var numeric = [];
+
+    headers.forEach(function (header, index) {
+      var values = [];
+      var clean = true;
+
+      for (var r = 0; r < rows.length; r++) {
+        var value = rows[r][index];
+        if (isBlank(value)) continue;
+        if (!isNumeric(value)) { clean = false; break; }
+        values.push(value);
+      }
+
+      if (clean && values.length) numeric.push({ header: header, index: index, values: values });
+    });
+
+    return numeric;
+  }
+
+  function summarise(column) {
+    var sum = 0, min = Infinity, max = -Infinity;
+
+    for (var i = 0; i < column.values.length; i++) {
+      var value = column.values[i];
+      sum += value;
+      if (value < min) min = value;
+      if (value > max) max = value;
+    }
+
+    return {
+      header: column.header,
+      count: column.values.length,
+      sum: sum,
+      average: sum / column.values.length,
+      min: min,
+      max: max
+    };
+  }
+
+  function buildReport(state) {
+    var numericColumns = findNumericColumns(state.headers, state.rows);
+
+    return {
+      rowCount: state.rows.length,
+      columnCount: state.headers.length,
+      numericCount: numericColumns.length,
+      columns: numericColumns.map(summarise)
+    };
+  }
+
+  /* ------------------------------------------------------------------ *
+   * one tab panel
+   * ------------------------------------------------------------------ */
+
+  function createPanel(tab) {
+    var state = { fileName: "", sheetName: "", headers: [], rows: [], report: null };
+
+    var panel = el("section", "panel");
+    panel.id = "panel-" + tab.id;
+    panel.setAttribute("role", "tabpanel");
+    panel.setAttribute("aria-labelledby", "tab-" + tab.id);
+
+    /* ---- upload card ---- */
+    var uploadCard = el("div", "card");
+    uploadCard.appendChild(el("h2", null, tab.title));
+    uploadCard.appendChild(el("p", "sub", "Upload an Excel workbook (.xlsx or .xls). The first sheet is read."));
+
+    var drop = el("div", "drop");
+    drop.tabIndex = 0;
+    drop.setAttribute("role", "button");
+    drop.setAttribute("aria-label", "Upload an Excel file for " + tab.title);
+    drop.innerHTML =
+      '<div class="icon" aria-hidden="true">&#128202;</div>' +
+      '<span class="big">Drag &amp; drop your Excel file here</span>' +
+      '<span class="small">or click to browse &mdash; .xlsx, .xls</span>';
+
+    var input = el("input");
+    input.type = "file";
+    input.accept = ".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel";
+    drop.appendChild(input);
+    uploadCard.appendChild(drop);
+
+    var filebar = el("div", "filebar");
+    var fileName = el("span", "name");
+    var fileMeta = el("span", "meta");
+    filebar.appendChild(el("span", null, "✓"));
+    filebar.appendChild(fileName);
+    filebar.appendChild(fileMeta);
+    uploadCard.appendChild(filebar);
+
+    var alert = el("div", "alert");
+    alert.setAttribute("role", "alert");
+    uploadCard.appendChild(alert);
+
+    var actions = el("div", "actions");
+    var generateBtn = el("button", "btn btn-primary", "Generate report");
+    var downloadBtn = el("button", "btn btn-secondary", "Download enhanced report (.xlsx)");
+    generateBtn.type = "button";
+    downloadBtn.type = "button";
+    generateBtn.disabled = true;
+    downloadBtn.disabled = true;
+    actions.appendChild(generateBtn);
+    actions.appendChild(downloadBtn);
+    uploadCard.appendChild(actions);
+    panel.appendChild(uploadCard);
+
+    /* ---- preview card ---- */
+    var previewCard = el("div", "card");
+    previewCard.appendChild(el("h2", null, "Data preview"));
+    previewCard.appendChild(el("p", "sub", "First " + PREVIEW_ROWS + " rows of the uploaded sheet."));
+    var previewBody = el("div");
+    previewBody.appendChild(el("div", "empty", "No file loaded yet."));
+    previewCard.appendChild(previewBody);
+    panel.appendChild(previewCard);
+
+    /* ---- report card ---- */
+    var reportCard = el("div", "card");
+    reportCard.appendChild(el("h2", null, "Report"));
+    reportCard.appendChild(el("p", "sub", "Summary statistics for every numeric column."));
+    var reportBody = el("div");
+    reportBody.appendChild(el("div", "empty", "Generate a report to see the summary."));
+    reportCard.appendChild(reportBody);
+    panel.appendChild(reportCard);
+
+    /* ---- rendering ---- */
+
+    function showError(message) {
+      alert.textContent = message;
+      alert.classList.add("show");
+    }
+
+    function clearError() {
+      alert.textContent = "";
+      alert.classList.remove("show");
+    }
+
+    function renderPreview() {
+      previewBody.innerHTML = "";
+
+      if (!state.headers.length) {
+        previewBody.appendChild(el("div", "empty", "No file loaded yet."));
+        return;
+      }
+
+      var visible = state.rows.slice(0, PREVIEW_ROWS);
+      var scroll = el("div", "table-scroll");
+      var table = el("table");
+
+      var thead = el("thead");
+      var headRow = el("tr");
+      state.headers.forEach(function (header) {
+        headRow.appendChild(el("th", null, header));
+      });
+      thead.appendChild(headRow);
+      table.appendChild(thead);
+
+      var tbody = el("tbody");
+      visible.forEach(function (row) {
+        var tr = el("tr");
+        for (var c = 0; c < state.headers.length; c++) {
+          var value = row[c];
+          var td = el("td", isNumeric(value) ? "num" : null, formatCell(value));
+          td.title = td.textContent;
+          tr.appendChild(td);
+        }
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+
+      scroll.appendChild(table);
+      previewBody.appendChild(scroll);
+      previewBody.appendChild(el("div", "hint",
+        "Showing " + visible.length + " of " + state.rows.length + " rows · sheet “" + state.sheetName + "”"));
+    }
+
+    function renderReport() {
+      reportBody.innerHTML = "";
+
+      if (!state.report) {
+        reportBody.appendChild(el("div", "empty", "Generate a report to see the summary."));
+        return;
+      }
+
+      var stats = el("div", "stats");
+      [
+        ["Rows", state.report.rowCount],
+        ["Columns", state.report.columnCount],
+        ["Numeric fields", state.report.numericCount]
+      ].forEach(function (pair) {
+        var box = el("div", "stat");
+        box.appendChild(el("div", "label", pair[0]));
+        box.appendChild(el("div", "value", pair[1].toLocaleString()));
+        stats.appendChild(box);
+      });
+      reportBody.appendChild(stats);
+
+      if (!state.report.columns.length) {
+        reportBody.appendChild(el("div", "empty", "No numeric columns were found in this sheet."));
+        return;
+      }
+
+      var scroll = el("div", "table-scroll");
+      var table = el("table");
+      var thead = el("thead");
+      var headRow = el("tr");
+      ["Column", "Count", "Sum", "Average", "Min", "Max"].forEach(function (label) {
+        headRow.appendChild(el("th", null, label));
+      });
+      thead.appendChild(headRow);
+      table.appendChild(thead);
+
+      var tbody = el("tbody");
+      state.report.columns.forEach(function (column) {
+        var tr = el("tr");
+        tr.appendChild(el("td", null, column.header));
+        [column.count, column.sum, column.average, column.min, column.max].forEach(function (value) {
+          tr.appendChild(el("td", "num", formatNumber(value)));
+        });
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+
+      scroll.appendChild(table);
+      reportBody.appendChild(scroll);
+      reportBody.appendChild(el("div", "hint",
+        "Placeholder logic — the same summary runs on every tab until each report’s rules are defined."));
+    }
+
+    /* ---- file handling ---- */
+
+    function handleFile(file) {
+      if (!file) return;
+
+      if (typeof XLSX === "undefined") {
+        showError("The Excel library could not be loaded. Check your internet connection and reload the page.");
+        return;
+      }
+
+      if (!/\.(xlsx|xls|xlsm|xlsb)$/i.test(file.name)) {
+        showError("“" + file.name + "” is not an Excel file. Please upload a .xlsx or .xls workbook.");
+        return;
+      }
+
+      clearError();
+
+      var reader = new FileReader();
+
+      reader.onerror = function () {
+        showError("Could not read the file. Please try again.");
+      };
+
+      reader.onload = function (event) {
+        try {
+          var workbook = XLSX.read(new Uint8Array(event.target.result), { type: "array", cellDates: true });
+          var sheetName = workbook.SheetNames[0];
+
+          if (!sheetName) {
+            showError("This workbook has no sheets.");
+            return;
+          }
+
+          var matrix = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], {
+            header: 1,
+            defval: "",
+            blankrows: false,
+            raw: true
+          });
+
+          if (!matrix.length) {
+            showError("The first sheet (“" + sheetName + "”) is empty.");
+            return;
+          }
+
+          var headerRow = matrix[0];
+          state.sheetName = sheetName;
+          state.fileName = file.name;
+          state.headers = headerRow.map(function (header, index) {
+            return isBlank(header) ? "Column " + (index + 1) : String(header);
+          });
+          state.rows = matrix.slice(1).map(function (row) {
+            var padded = [];
+            for (var c = 0; c < state.headers.length; c++) padded.push(row[c]);
+            return padded;
+          });
+          state.report = null;
+
+          fileName.textContent = file.name;
+          fileMeta.textContent = formatBytes(file.size) + " · " + state.rows.length + " rows · " + state.headers.length + " columns";
+          filebar.classList.add("show");
+
+          generateBtn.disabled = false;
+          downloadBtn.disabled = true;
+
+          renderPreview();
+          renderReport();
+        } catch (error) {
+          showError("Could not parse this workbook: " + error.message);
+        }
+      };
+
+      reader.readAsArrayBuffer(file);
+    }
+
+    drop.addEventListener("click", function () { input.click(); });
+    drop.addEventListener("keydown", function (event) {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        input.click();
+      }
+    });
+    input.addEventListener("change", function () {
+      handleFile(input.files[0]);
+      input.value = "";
+    });
+
+    ["dragenter", "dragover"].forEach(function (name) {
+      drop.addEventListener(name, function (event) {
+        event.preventDefault();
+        drop.classList.add("is-over");
+      });
+    });
+    ["dragleave", "dragend", "drop"].forEach(function (name) {
+      drop.addEventListener(name, function () { drop.classList.remove("is-over"); });
+    });
+    drop.addEventListener("drop", function (event) {
+      event.preventDefault();
+      if (event.dataTransfer && event.dataTransfer.files.length) handleFile(event.dataTransfer.files[0]);
+    });
+
+    /* ---- actions ---- */
+
+    generateBtn.addEventListener("click", function () {
+      if (!state.headers.length) return;
+      clearError();
+      state.report = buildReport(state);
+      downloadBtn.disabled = false;
+      renderReport();
+    });
+
+    downloadBtn.addEventListener("click", function () {
+      if (!state.report) return;
+
+      var summary = [
+        ["Reports Generator"],
+        ["Report", tab.title],
+        ["Source file", state.fileName],
+        ["Source sheet", state.sheetName],
+        ["Generated", new Date().toLocaleString()],
+        [],
+        ["Rows", state.report.rowCount],
+        ["Columns", state.report.columnCount],
+        ["Numeric fields", state.report.numericCount],
+        [],
+        ["Column", "Count", "Sum", "Average", "Min", "Max"]
+      ];
+
+      state.report.columns.forEach(function (column) {
+        summary.push([column.header, column.count, column.sum, column.average, column.min, column.max]);
+      });
+
+      if (!state.report.columns.length) summary.push(["No numeric columns found"]);
+
+      var summarySheet = XLSX.utils.aoa_to_sheet(summary);
+      summarySheet["!cols"] = [{ wch: 30 }, { wch: 12 }, { wch: 16 }, { wch: 16 }, { wch: 14 }, { wch: 14 }];
+
+      var dataSheet = XLSX.utils.aoa_to_sheet([state.headers].concat(state.rows));
+      dataSheet["!cols"] = state.headers.map(function () { return { wch: 18 }; });
+
+      var workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, summarySheet, "Summary");
+      XLSX.utils.book_append_sheet(workbook, dataSheet, "Data");
+
+      XLSX.writeFile(workbook, slugify(tab.title) + "-enhanced.xlsx");
+    });
+
+    return panel;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * tab wiring
+   * ------------------------------------------------------------------ */
+
+  var tablist = document.getElementById("tablist");
+  var panels = document.getElementById("panels");
+  var buttons = [];
+
+  function select(index) {
+    buttons.forEach(function (button, i) {
+      var active = i === index;
+      button.setAttribute("aria-selected", active ? "true" : "false");
+      button.tabIndex = active ? 0 : -1;
+      document.getElementById("panel-" + TABS[i].id).hidden = !active;
+    });
+  }
+
+  TABS.forEach(function (tab, index) {
+    var button = el("button", null, tab.title);
+    button.type = "button";
+    button.id = "tab-" + tab.id;
+    button.setAttribute("role", "tab");
+    button.setAttribute("aria-controls", "panel-" + tab.id);
+    button.addEventListener("click", function () { select(index); });
+    button.addEventListener("keydown", function (event) {
+      var next = event.key === "ArrowRight" ? index + 1 : event.key === "ArrowLeft" ? index - 1 : -1;
+      if (next < 0 || next >= TABS.length) return;
+      event.preventDefault();
+      select(next);
+      buttons[next].focus();
+    });
+
+    tablist.appendChild(button);
+    buttons.push(button);
+    panels.appendChild(createPanel(tab));
+  });
+
+  select(0);
+})();
+</script>
+</body>
+</html>
