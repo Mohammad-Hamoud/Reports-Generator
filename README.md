@@ -54,6 +54,7 @@ editable controls before the report is generated.
 | Daily Salary | formula | `Monthly Salary ÷ Days in Month` |
 | Payment for Day | formula | `Daily Salary × MIN(Completion %, 100%)` — never more than one full day |
 | Excess Above Cap | formula | `Daily Salary × MAX(Completion % − 100%, 0)` — what the cap trimmed off |
+| Day Off? | formula | `Yes` / `No`, so you can see exactly which rows qualify for OT |
 | OT Hours | formula | On a worked day off: `1.5 × MIN(Total Hours, Required Hours)` |
 | Manual OT Hours | **you fill in** | Overrides OT Hours on any row when it is not empty |
 | OT Pay | formula | `OT Hours × (Daily Salary ÷ Required Hours)` |
@@ -67,14 +68,29 @@ moment a monthly salary, incentive or deduction is typed into the downloaded fil
 
 A day with no recorded hours counts as 0% completion, which pays 0 for that day.
 
+The `Cost Center` column is skipped when the uploaded sheet already has a cost
+centre/center column of its own, so no duplicate is added.
+
 ### Overtime
 
-OT is credited when the status column contains `off` or `holiday` — `Day Off`, `Weekly
-Off`, `Holiday` all match — **and** hours were actually worked that day. The worked hours
-are capped at the daily requirement before the 1.5 multiplier, so a 14-hour day off pays
-`1.5 × 12 = 18` OT hours, not 21.
+OT is credited when the status column matches one of the day-off words — `off, holiday`
+by default, so `Day Off`, `Weekly Off` and `Holiday` all qualify — **and** hours were
+actually worked that day. The words are editable in the mapping card, which also lists
+every status value found in the sheet and marks the ones that will earn OT, so an
+unrecognised wording is visible before the report is generated.
+
+The worked hours are capped at the daily requirement before the 1.5 multiplier, so a
+14-hour day off pays `1.5 × 12 = 18` OT hours, not 21.
 
 `Manual OT Hours` wins whenever it holds a value, on any row, day off or not.
+
+### Blank cells and typed-in values
+
+Empty source cells are written as genuinely blank cells, not empty strings. This matters:
+a cell holding an empty string makes Excel treat the whole column as text, and the older
+formulas used `N()`, which returns `0` for anything textual — including a number typed as
+text. Every formula now guards with `ISNUMBER()` instead, so a value typed into a blank
+`Total Hours` cell immediately flows through completion %, payment, OT and the net.
 
 ### Exported workbook
 

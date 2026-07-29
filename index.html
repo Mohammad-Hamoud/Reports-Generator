@@ -633,6 +633,7 @@
     { key: "daily",      title: "Daily Salary",          role: CALC,  format: "#,##0.00" },
     { key: "payment",    title: "Payment for Day",       role: CALC,  format: "#,##0.00" },
     { key: "excess",     title: "Excess Above Cap",      role: CALC,  format: "#,##0.00" },
+    { key: "dayOff",     title: "Day Off?",              role: CALC,  format: null },
     { key: "otHours",    title: "OT Hours",              role: CALC,  format: "0.00" },
     { key: "manualOt",   title: "Manual OT Hours",       role: INPUT, format: "0.00" },
     { key: "otPay",      title: "OT Pay",                role: CALC,  format: "#,##0.00" },
@@ -643,16 +644,35 @@
   ];
 
   var OT_MULTIPLIER = 1.5;
+  var DEFAULT_DAY_OFF_WORDS = "off, holiday";
 
-  // Timesheets spell the non-working day in several ways; all of them carry
-  // "off" or "holiday" in the status text.
-  function isDayOff(value) {
-    var text = String(value === undefined || value === null ? "" : value).toLowerCase();
-    return text.indexOf("off") >= 0 || text.indexOf("holiday") >= 0;
+  // Timesheets spell the non-working day in many ways ("Weekly Off", "Day Off",
+  // "Holiday", "Rest Day"), so the words to look for are configurable.
+  function parseKeywords(text) {
+    return String(text || "").split(",")
+      .map(function (word) { return word.trim().toLowerCase(); })
+      .filter(function (word) { return word.length > 0; });
   }
 
-  function payrollIndex(key) {
-    for (var i = 0; i < PAYROLL_COLUMNS.length; i++) if (PAYROLL_COLUMNS[i].key === key) return i;
+  function isDayOff(value, keywords) {
+    var text = String(value === undefined || value === null ? "" : value).toLowerCase();
+    for (var i = 0; i < keywords.length; i++) {
+      if (text.indexOf(keywords[i]) >= 0) return true;
+    }
+    return false;
+  }
+
+  // The uploaded sheet may already carry a cost centre, in which case adding a
+  // second empty one would only confuse things.
+  function payrollColumnsFor(headers) {
+    var hasCostCentre = findColumn(headers, [/cost\s*(centre|center)/i]) >= 0;
+    return PAYROLL_COLUMNS.filter(function (column) {
+      return !(column.key === "costCenter" && hasCostCentre);
+    });
+  }
+
+  function keyIndex(columns, key) {
+    for (var i = 0; i < columns.length; i++) if (columns[i].key === key) return i;
     return -1;
   }
 
@@ -666,6 +686,7 @@
     var hoursIndex = mapping.hoursIndex;
     var statusIndex = mapping.statusIndex;
     var required = mapping.requiredHours;
+    var dayOffWords = parseKeywords(mapping.dayOffWords);
 
     var datesParsed = 0, hoursConverted = 0;
 
@@ -690,7 +711,7 @@
     var computed = rows.map(function (row) {
       var hours = hoursIndex >= 0 && isNumeric(row[hoursIndex]) ? row[hoursIndex] : 0;
       var date = dateIndex >= 0 && row[dateIndex] instanceof Date ? row[dateIndex] : null;
-      var dayOff = statusIndex >= 0 && isDayOff(row[statusIndex]);
+      var dayOff = statusIndex >= 0 && isDayOff(row[statusIndex], dayOffWords);
       var pct = required > 0 ? hours / required : null;
 
       return {
@@ -713,9 +734,11 @@
       hoursIndex: hoursIndex,
       statusIndex: statusIndex,
       requiredHours: required,
+      dayOffWords: dayOffWords,
       datesParsed: datesParsed,
       hoursConverted: hoursConverted,
-      sourceCount: headers.length
+      sourceCount: headers.length,
+      payrollColumns: payrollColumnsFor(headers)
     };
   }
 
@@ -816,10 +839,17 @@
     });
 
     var source = model.sourceCount;
+    var payroll = model.payrollColumns;
     var letters = {};
-    PAYROLL_COLUMNS.forEach(function (column, index) {
+    payroll.forEach(function (column, index) {
       letters[column.key] = columnLetter(source + index + 1);
     });
+
+    // Excel treats an empty string as text. Writing real blanks instead keeps
+    // the numeric columns numeric, so a value typed in later just works.
+    function cellValue(value) {
+      return isBlank(value) ? null : value;
+    }
 
     var dateLetter = model.dateIndex >= 0 ? columnLetter(model.dateIndex + 1) : null;
     var hoursLetter = model.hoursIndex >= 0 ? columnLetter(model.hoursIndex + 1) : null;
@@ -835,7 +865,7 @@
       return { header: title, width: measureWidth(title, model.rows, index), style: bodyStyle(SOURCE, format) };
     });
 
-    PAYROLL_COLUMNS.forEach(function (column) {
+    payroll.forEach(function (column) {
       columns.push({
         header: column.title,
         width: Math.max(column.title.length + 4, 14),
@@ -845,43 +875,62 @@
 
     sheet.columns = columns;
 
+    // OR(ISNUMBER(SEARCH("off",M2)),ISNUMBER(SEARCH("holiday",M2)))
+    function dayOffTest(row) {
+      var tests = model.dayOffWords.map(function (word) {
+        return "ISNUMBER(SEARCH(\"" + word.replace(/"/g, "\"\"") + "\"," + statusLetter + row + "))";
+      });
+      return tests.length > 1 ? "OR(" + tests.join(",") + ")" : tests[0];
+    }
+
     model.rows.forEach(function (row, index) {
-      var line = row.slice();
+      var line = row.map(cellValue);
       var r = index + 2;
 
+      // ISNUMBER guards rather than N(): N() silently returns 0 for anything
+      // textual, including a number that was typed as text.
       var pct = hoursLetter
-        ? { formula: "IF(" + letters.required + r + "=0,\"\",N(" + hoursLetter + r + ")/" + letters.required + r + ")" }
+        ? { formula: "IF(" + letters.required + r + "=0,\"\",IF(ISNUMBER(" + hoursLetter + r + ")," + hoursLetter + r + "/" + letters.required + r + ",0))" }
         : null;
 
       var days = dateLetter
-        ? { formula: "IF(" + dateLetter + r + "=\"\",\"\",DAY(EOMONTH(" + dateLetter + r + ",0)))" }
+        ? { formula: "IF(ISNUMBER(" + dateLetter + r + "),DAY(EOMONTH(" + dateLetter + r + ",0)),\"\")" }
+        : null;
+
+      var dayOff = statusLetter && model.dayOffWords.length
+        ? { formula: "IF(" + statusLetter + r + "=\"\",\"\",IF(" + dayOffTest(r) + ",\"Yes\",\"No\"))" }
         : null;
 
       // A manual entry always wins; otherwise OT only exists on a day off that
       // was actually worked, and the hours are capped before the multiplier.
-      var otHours = statusLetter && hoursLetter
+      var otHours = dayOff
         ? { formula: "IF(" + letters.manualOt + r + "<>\"\"," + letters.manualOt + r +
-            ",IF(AND(OR(ISNUMBER(SEARCH(\"off\"," + statusLetter + r + ")),ISNUMBER(SEARCH(\"holiday\"," + statusLetter + r + "))),N(" + hoursLetter + r + ")>0)," +
-            OT_MULTIPLIER + "*MIN(N(" + hoursLetter + r + ")," + letters.required + r + "),\"\"))" }
+            ",IF(AND(" + letters.dayOff + r + "=\"Yes\",ISNUMBER(" + hoursLetter + r + ")," + hoursLetter + r + ">0)," +
+            OT_MULTIPLIER + "*MIN(" + hoursLetter + r + "," + letters.required + r + "),\"\"))" }
         : { formula: "IF(" + letters.manualOt + r + "<>\"\"," + letters.manualOt + r + ",\"\")" };
 
-      line.push(null);                  // Cost Center — filled in by the user
-      line.push(model.requiredHours);
-      line.push(pct);
-      line.push(null);                  // Monthly Salary — filled in by the user
-      line.push(days);
-      line.push({ formula: "IF(OR(" + letters.monthly + r + "=\"\"," + letters.days + r + "=\"\"),\"\"," + letters.monthly + r + "/" + letters.days + r + ")" });
-      // Payment is capped at one full day's salary...
-      line.push({ formula: "IF(OR(" + letters.daily + r + "=\"\"," + letters.pct + r + "=\"\"),\"\"," + letters.daily + r + "*MIN(" + letters.pct + r + ",1))" });
-      // ...and whatever the cap trimmed off is reported next to it.
-      line.push({ formula: "IF(OR(" + letters.daily + r + "=\"\"," + letters.pct + r + "=\"\"),\"\"," + letters.daily + r + "*MAX(" + letters.pct + r + "-1,0))" });
-      line.push(otHours);
-      line.push(null);                  // Manual OT Hours — filled in by the user
-      line.push({ formula: "IF(OR(" + letters.otHours + r + "=\"\"," + letters.daily + r + "=\"\"," + letters.required + r + "=0),\"\"," + letters.otHours + r + "*" + letters.daily + r + "/" + letters.required + r + ")" });
-      line.push(null);                  // Incentive
-      line.push(null);                  // Deduction
-      line.push(null);                  // Adjustment Note
-      line.push({ formula: "IF(AND(" + letters.payment + r + "=\"\"," + letters.otPay + r + "=\"\"," + letters.incentive + r + "=\"\"," + letters.deduction + r + "=\"\"),\"\",SUM(" + letters.payment + r + "," + letters.otPay + r + "," + letters.incentive + r + ")-SUM(" + letters.deduction + r + "))" });
+      var values = {
+        costCenter: null,               // filled in by the user
+        required: model.requiredHours,
+        pct: pct,
+        monthly: null,                  // filled in by the user
+        days: days,
+        daily: { formula: "IF(OR(" + letters.monthly + r + "=\"\"," + letters.days + r + "=\"\"),\"\"," + letters.monthly + r + "/" + letters.days + r + ")" },
+        // Payment is capped at one full day's salary...
+        payment: { formula: "IF(OR(" + letters.daily + r + "=\"\"," + letters.pct + r + "=\"\"),\"\"," + letters.daily + r + "*MIN(" + letters.pct + r + ",1))" },
+        // ...and whatever the cap trimmed off is reported next to it.
+        excess: { formula: "IF(OR(" + letters.daily + r + "=\"\"," + letters.pct + r + "=\"\"),\"\"," + letters.daily + r + "*MAX(" + letters.pct + r + "-1,0))" },
+        dayOff: dayOff,
+        otHours: otHours,
+        manualOt: null,                 // filled in by the user
+        otPay: { formula: "IF(OR(" + letters.otHours + r + "=\"\"," + letters.daily + r + "=\"\"," + letters.required + r + "=0),\"\"," + letters.otHours + r + "*" + letters.daily + r + "/" + letters.required + r + ")" },
+        incentive: null,
+        deduction: null,
+        note: null,
+        net: { formula: "IF(AND(" + letters.payment + r + "=\"\"," + letters.otPay + r + "=\"\"," + letters.incentive + r + "=\"\"," + letters.deduction + r + "=\"\"),\"\",SUM(" + letters.payment + r + "," + letters.otPay + r + "," + letters.incentive + r + ")-SUM(" + letters.deduction + r + "))" }
+      };
+
+      payroll.forEach(function (column) { line.push(values[column.key]); });
 
       sheet.addRow(line);
     });
@@ -892,16 +941,16 @@
     model.headers.forEach(function (title, index) {
       headerRow.getCell(index + 1).style = headerStyle(SOURCE);
     });
-    PAYROLL_COLUMNS.forEach(function (column, index) {
+    payroll.forEach(function (column, index) {
       headerRow.getCell(source + index + 1).style = headerStyle(column.role);
     });
 
     var lastRow = model.rows.length + 1;
-    var lastColumn = columnLetter(source + PAYROLL_COLUMNS.length);
+    var lastColumn = columnLetter(source + payroll.length);
 
     sheet.autoFilter = {
       from: { row: 1, column: 1 },
-      to: { row: lastRow, column: source + PAYROLL_COLUMNS.length }
+      to: { row: lastRow, column: source + payroll.length }
     };
 
     if (lastRow > 1) {
@@ -997,7 +1046,8 @@
     section("Rules applied");
     line("Payment cap", "Payment for Day never exceeds Daily Salary.");
     line("Excess Above Cap", "Daily Salary x (Completion % - 100%), when over 100%.");
-    line("OT trigger", "Status contains \"off\" or \"holiday\" and hours were worked.");
+    line("Day Off? words", model.dayOffWords.join(", "));
+    line("OT trigger", "Day Off? is Yes and a number of hours was recorded.");
     line("OT hours", OT_MULTIPLIER + " x MIN(Total Hours, Required Hours / Day).");
     line("OT rate", "Daily Salary / Required Hours per day.");
     line("Manual OT Hours", "Overrides the calculated OT Hours on any row.");
@@ -1092,7 +1142,9 @@
     data.columns = cleaned.headers.map(function (title, index) {
       return { header: title, width: measureWidth(title, cleaned.rows, index), style: bodyStyle(SOURCE, null) };
     });
-    cleaned.rows.forEach(function (row) { data.addRow(row); });
+    cleaned.rows.forEach(function (row) {
+      data.addRow(row.map(function (value) { return isBlank(value) ? null : value; }));
+    });
     data.getRow(1).eachCell(function (cell) { cell.style = headerStyle(SOURCE); });
     data.views = [{ state: "frozen", ySplit: 1 }];
 
@@ -1160,7 +1212,8 @@
     panel.appendChild(uploadCard);
 
     /* ---- mapping (casuals only) ---- */
-    var mappingCard, dateSelect, hoursSelect, statusSelect, requiredInput, cleanupNotes, mappingAlert;
+    var mappingCard, dateSelect, hoursSelect, statusSelect, requiredInput, dayOffInput,
+        cleanupNotes, mappingAlert, statusPreview;
 
     if (tab.mode === "casuals") {
       mappingCard = el("div", "card");
@@ -1200,7 +1253,17 @@
       requiredInput.value = String(DEFAULT_REQUIRED_HOURS);
       field("Required hours per day", requiredInput);
 
+      dayOffInput = el("input");
+      dayOffInput.id = "dayoff-" + tab.id;
+      dayOffInput.type = "text";
+      dayOffInput.value = DEFAULT_DAY_OFF_WORDS;
+      dayOffInput.placeholder = "off, holiday";
+      field("Day-off words in status (comma separated)", dayOffInput);
+
       mappingCard.appendChild(fields);
+
+      statusPreview = el("div", "hint");
+      mappingCard.appendChild(statusPreview);
 
       mappingAlert = el("div", "alert warn");
       mappingCard.appendChild(mappingAlert);
@@ -1208,6 +1271,9 @@
       cleanupNotes = el("ul", "notes");
       mappingCard.appendChild(cleanupNotes);
       panel.appendChild(mappingCard);
+
+      statusSelect.addEventListener("change", function () { renderStatusPreview(); });
+      dayOffInput.addEventListener("input", function () { renderStatusPreview(); });
     }
 
     /* ---- preview ---- */
@@ -1304,31 +1370,36 @@
       }
 
       var model = state.model;
-      var headers = model.headers.concat(PAYROLL_COLUMNS.map(function (column) { return column.title; }));
-      var pctColumn = model.sourceCount + payrollIndex("pct");
+      var payroll = model.payrollColumns;
+      var headers = model.headers.concat(payroll.map(function (column) { return column.title; }));
+      var pctColumn = model.sourceCount + keyIndex(payroll, "pct");
 
       var rows = model.rows.map(function (row, index) {
         var info = model.computed[index];
-        return row.concat([
-          "",                 // Cost Center
-          model.requiredHours,
-          info.pct,
-          "",                 // Monthly Salary
-          info.days,
-          "",                 // Daily Salary
-          "",                 // Payment for Day
-          "",                 // Excess Above Cap
-          info.otHours,
-          "",                 // Manual OT Hours
-          "",                 // OT Pay
-          "", "", "",         // Incentive / Deduction / Note
-          ""                  // Net Payable
-        ]);
+        var preview = {
+          costCenter: "",
+          required: model.requiredHours,
+          pct: info.pct,
+          monthly: "",
+          days: info.days,
+          daily: "",
+          payment: "",
+          excess: "",
+          dayOff: model.statusIndex < 0 || isBlank(row[model.statusIndex]) ? "" : (info.dayOff ? "Yes" : "No"),
+          otHours: info.otHours,
+          manualOt: "",
+          otPay: "",
+          incentive: "",
+          deduction: "",
+          note: "",
+          net: ""
+        };
+        return row.concat(payroll.map(function (column) { return preview[column.key]; }));
       });
 
       function roleAt(index) {
         if (index < model.sourceCount) return SOURCE;
-        return PAYROLL_COLUMNS[index - model.sourceCount].role;
+        return payroll[index - model.sourceCount].role;
       }
 
       function classAt(rowIndex, columnIndex) {
@@ -1453,6 +1524,50 @@
       select.value = String(selectedIndex);
     }
 
+    // Spells out which status values will earn overtime, so a wording that is
+    // not matched is obvious before the report is generated.
+    function renderStatusPreview() {
+      var cleaned = state.cleaned;
+      var statusIndex = parseInt(statusSelect.value, 10);
+      statusPreview.innerHTML = "";
+
+      if (!cleaned || statusIndex < 0) {
+        statusPreview.textContent = "No status column selected — overtime will only come from Manual OT Hours.";
+        return;
+      }
+
+      var keywords = parseKeywords(dayOffInput.value);
+      var counts = {};
+      cleaned.rows.forEach(function (row) {
+        var value = row[statusIndex];
+        if (isBlank(value)) return;
+        var text = String(value).trim();
+        counts[text] = (counts[text] || 0) + 1;
+      });
+
+      var values = Object.keys(counts).sort(function (a, b) { return counts[b] - counts[a]; });
+      if (!values.length) {
+        statusPreview.textContent = "The selected status column is empty.";
+        return;
+      }
+
+      var matched = values.filter(function (value) { return isDayOff(value, keywords); });
+
+      statusPreview.appendChild(el("strong", null, "Status values found: "));
+      values.slice(0, 12).forEach(function (value, index) {
+        if (index) statusPreview.appendChild(document.createTextNode(" · "));
+        var hit = isDayOff(value, keywords);
+        var chip = el("span", null, value + " (" + counts[value].toLocaleString() + ")" + (hit ? " → OT" : ""));
+        if (hit) chip.style.color = "var(--green-600)";
+        if (hit) chip.style.fontWeight = "600";
+        statusPreview.appendChild(chip);
+      });
+      if (!matched.length) {
+        statusPreview.appendChild(el("div", null,
+          "None of these match the day-off words above, so no row qualifies for calculated OT."));
+      }
+    }
+
     function renderMapping() {
       var cleaned = state.cleaned;
       var dateIndex = detectDateColumn(cleaned.headers, cleaned.rows);
@@ -1470,7 +1585,13 @@
       notes.push("Merged cells flattened");
       if (cleaned.splitApplied) notes.push("Split employee code and employee name into separate columns");
       notes.push("Headers cleaned and line breaks removed");
+      notes.push("Empty cells exported as real blanks, so typed-in values calculate immediately");
+      if (findColumn(cleaned.headers, [/cost\s*(centre|center)/i]) >= 0) {
+        notes.push("Sheet already has a cost centre column — no duplicate added");
+      }
       notes.forEach(function (note) { cleanupNotes.appendChild(el("li", null, note)); });
+
+      renderStatusPreview();
 
       var warnings = [];
       if (dateIndex < 0) warnings.push("no date column");
@@ -1493,7 +1614,8 @@
         dateIndex: parseInt(dateSelect.value, 10),
         hoursIndex: parseInt(hoursSelect.value, 10),
         statusIndex: parseInt(statusSelect.value, 10),
-        requiredHours: parseFloat(requiredInput.value) || 0
+        requiredHours: parseFloat(requiredInput.value) || 0,
+        dayOffWords: dayOffInput.value
       };
     }
 
