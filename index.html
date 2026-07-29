@@ -4,8 +4,9 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Reports Generator</title>
-<meta name="description" content="Upload an Excel workbook, preview the data, generate a summary report and download an enhanced .xlsx file." />
+<meta name="description" content="Upload an Excel timesheet, clean it up, and export a professional payroll-ready report." />
 <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
 <style>
   :root {
     --green-50:  #f0fdf4;
@@ -14,7 +15,9 @@
     --green-500: #22c55e;
     --green-600: #16a34a;
     --green-700: #15803d;
-    --green-800: #166534;
+
+    --teal-600:  #0d9488;
+    --amber-600: #d97706;
 
     --bg:        #f6f8f7;
     --surface:   #ffffff;
@@ -24,6 +27,9 @@
     --muted:     #67766e;
     --shadow:    0 1px 2px rgba(16, 33, 24, .04), 0 8px 24px rgba(16, 33, 24, .06);
     --radius:    14px;
+
+    --tint-calc:  #ecfeff;
+    --tint-input: #fffbeb;
   }
 
   @media (prefers-color-scheme: dark) {
@@ -38,6 +44,8 @@
       --green-100: #14301f;
       --green-200: #1b4029;
       --shadow:    0 1px 2px rgba(0, 0, 0, .3), 0 8px 24px rgba(0, 0, 0, .35);
+      --tint-calc:  #0d2b2b;
+      --tint-input: #2c2313;
     }
   }
 
@@ -52,7 +60,7 @@
     -webkit-font-smoothing: antialiased;
   }
 
-  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 20px 64px; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 0 20px 64px; }
 
   /* ---------- header ---------- */
   header {
@@ -85,23 +93,16 @@
   }
   .tabs button {
     flex: 1 1 200px;
-    appearance: none;
-    border: 0;
-    background: transparent;
+    appearance: none; border: 0; background: transparent;
     color: var(--muted);
-    font: inherit;
-    font-size: 14px;
-    font-weight: 550;
-    padding: 11px 14px;
-    border-radius: 10px;
-    cursor: pointer;
+    font: inherit; font-size: 14px; font-weight: 550;
+    padding: 11px 14px; border-radius: 10px; cursor: pointer;
     transition: background .15s, color .15s;
     white-space: nowrap;
   }
   .tabs button:hover { background: var(--green-50); color: var(--green-700); }
   .tabs button[aria-selected="true"] {
-    background: var(--green-600);
-    color: #fff;
+    background: var(--green-600); color: #fff;
     box-shadow: 0 2px 8px rgba(22, 163, 74, .28);
   }
   .tabs button:focus-visible { outline: 2px solid var(--green-500); outline-offset: 2px; }
@@ -116,12 +117,8 @@
     padding: 22px;
     margin-bottom: 18px;
   }
-  .card > h2 {
-    margin: 0 0 4px;
-    font-size: 17px;
-    font-weight: 650;
-    letter-spacing: -.01em;
-  }
+  .card[hidden] { display: none; }
+  .card > h2 { margin: 0 0 4px; font-size: 17px; font-weight: 650; letter-spacing: -.01em; }
   .card > h2 + .sub { margin: 0 0 16px; color: var(--muted); font-size: 13.5px; }
 
   /* ---------- dropzone ---------- */
@@ -142,11 +139,8 @@
   .drop input[type="file"] { display: none; }
 
   .filebar {
-    display: none;
-    align-items: center;
-    gap: 10px;
-    margin-top: 14px;
-    padding: 10px 14px;
+    display: none; align-items: center; gap: 10px;
+    margin-top: 14px; padding: 10px 14px;
     background: var(--green-50);
     border: 1px solid var(--green-200);
     border-radius: 10px;
@@ -156,17 +150,12 @@
   .filebar .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .filebar .meta { color: var(--muted); margin-left: auto; white-space: nowrap; }
 
-  /* ---------- buttons ---------- */
+  /* ---------- buttons & fields ---------- */
   .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
   .btn {
-    appearance: none;
-    font: inherit;
-    font-size: 14px;
-    font-weight: 600;
-    padding: 10px 18px;
-    border-radius: 10px;
-    border: 1px solid transparent;
-    cursor: pointer;
+    appearance: none; font: inherit; font-size: 14px; font-weight: 600;
+    padding: 10px 18px; border-radius: 10px;
+    border: 1px solid transparent; cursor: pointer;
     transition: background .15s, border-color .15s, color .15s, opacity .15s;
   }
   .btn-primary { background: var(--green-600); color: #fff; }
@@ -176,13 +165,22 @@
   .btn:disabled { opacity: .45; cursor: not-allowed; }
   .btn:focus-visible { outline: 2px solid var(--green-500); outline-offset: 2px; }
 
-  /* ---------- stats ---------- */
-  .stats {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-    gap: 12px;
-    margin-bottom: 18px;
+  .fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
+  .field label { display: block; font-size: 12.5px; font-weight: 600; color: var(--muted); margin-bottom: 5px; }
+  .field select, .field input {
+    width: 100%; font: inherit; font-size: 14px;
+    padding: 9px 11px; border-radius: 9px;
+    border: 1px solid var(--border);
+    background: var(--surface-2); color: var(--text);
   }
+  .field select:focus, .field input:focus { outline: 2px solid var(--green-500); outline-offset: 1px; border-color: var(--green-500); }
+
+  .notes { list-style: none; padding: 0; margin: 16px 0 0; font-size: 13px; color: var(--muted); }
+  .notes li { padding: 3px 0 3px 20px; position: relative; }
+  .notes li::before { content: "✓"; position: absolute; left: 0; color: var(--green-600); font-weight: 700; }
+
+  /* ---------- stats ---------- */
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 18px; }
   .stat {
     background: var(--surface-2);
     border: 1px solid var(--border);
@@ -190,54 +188,53 @@
     border-radius: 10px;
     padding: 14px 16px;
   }
-  .stat .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; font-weight: 600; }
-  .stat .value { font-size: 26px; font-weight: 680; letter-spacing: -.02em; margin-top: 2px; }
+  .stat .label { font-size: 11.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; font-weight: 600; }
+  .stat .value { font-size: 24px; font-weight: 680; letter-spacing: -.02em; margin-top: 2px; }
 
   /* ---------- tables ---------- */
-  .table-scroll {
-    overflow: auto;
-    max-height: 460px;
-    border: 1px solid var(--border);
-    border-radius: 10px;
-  }
+  .table-scroll { overflow: auto; max-height: 480px; border: 1px solid var(--border); border-radius: 10px; }
   table { border-collapse: collapse; width: 100%; font-size: 13px; }
   thead th {
     position: sticky; top: 0; z-index: 1;
-    background: var(--green-600);
-    color: #fff;
-    text-align: left;
-    font-weight: 600;
-    padding: 9px 12px;
-    white-space: nowrap;
+    background: var(--green-600); color: #fff;
+    text-align: left; font-weight: 600;
+    padding: 9px 12px; white-space: nowrap;
   }
+  thead th.h-calc  { background: var(--teal-600); }
+  thead th.h-input { background: var(--amber-600); }
   tbody td {
-    padding: 8px 12px;
-    border-top: 1px solid var(--border);
-    white-space: nowrap;
-    max-width: 320px;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    padding: 8px 12px; border-top: 1px solid var(--border);
+    white-space: nowrap; max-width: 320px; overflow: hidden; text-overflow: ellipsis;
   }
   tbody tr:nth-child(even) { background: var(--surface-2); }
   tbody tr:hover { background: var(--green-50); }
   td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td.c-calc  { background: var(--tint-calc); }
+  td.c-input { background: var(--tint-input); }
+  td.under { color: #b91c1c; font-weight: 600; }
+  td.met   { color: #15803d; font-weight: 600; }
+  @media (prefers-color-scheme: dark) {
+    td.under { color: #fca5a5; }
+    td.met   { color: #86efac; }
+  }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 12px; font-size: 12.5px; color: var(--muted); }
+  .legend span { display: flex; align-items: center; gap: 6px; }
+  .legend i { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
 
   .hint { color: var(--muted); font-size: 12.5px; margin-top: 10px; }
   .empty { color: var(--muted); font-size: 14px; padding: 26px 0; text-align: center; }
 
   .alert {
-    display: none;
-    margin-top: 14px;
-    padding: 11px 14px;
-    border-radius: 10px;
-    font-size: 13.5px;
-    border: 1px solid #fca5a5;
-    background: #fef2f2;
-    color: #991b1b;
+    display: none; margin-top: 14px; padding: 11px 14px;
+    border-radius: 10px; font-size: 13.5px;
+    border: 1px solid #fca5a5; background: #fef2f2; color: #991b1b;
   }
   .alert.show { display: block; }
+  .alert.warn { border-color: #fcd34d; background: #fffbeb; color: #92400e; }
   @media (prefers-color-scheme: dark) {
     .alert { background: #2a1414; border-color: #6b2626; color: #fca5a5; }
+    .alert.warn { background: #2a2314; border-color: #6b5626; color: #fcd34d; }
   }
 
   footer { text-align: center; color: var(--muted); font-size: 13px; padding: 8px 0 0; }
@@ -258,7 +255,7 @@
       </div>
       <div>
         <h1>Reports Generator</h1>
-        <p>Upload an Excel workbook, review the data, and export an enhanced report.</p>
+        <p>Upload an Excel timesheet, clean it up, and export a payroll-ready report.</p>
       </div>
     </div>
   </div>
@@ -275,16 +272,26 @@
   "use strict";
 
   var TABS = [
-    { id: "casuals-detailed", title: "Casuals Detailed Report" },
-    { id: "fte-detailed",     title: "FTE Detailed Report" },
-    { id: "casual-summary",   title: "Casual Period Summary" },
-    { id: "fte-summary",      title: "FTE Period Summary" }
+    { id: "casuals-detailed", title: "Casuals Detailed Report", mode: "casuals" },
+    { id: "fte-detailed",     title: "FTE Detailed Report",     mode: "basic" },
+    { id: "casual-summary",   title: "Casual Period Summary",   mode: "basic" },
+    { id: "fte-summary",      title: "FTE Period Summary",      mode: "basic" }
   ];
 
   var PREVIEW_ROWS = 100;
+  var DEFAULT_REQUIRED_HOURS = 12;
+
+  /* Column roles drive both the on-screen tints and the workbook colours. */
+  var SOURCE = "source", CALC = "calc", INPUT = "input";
+
+  var THEME = {
+    source: { header: "FF15803D", body: null },
+    calc:   { header: "FF0F766E", body: "FFECFEFF" },
+    input:  { header: "FFB45309", body: "FFFFFBEB" }
+  };
 
   /* ------------------------------------------------------------------ *
-   * helpers
+   * small helpers
    * ------------------------------------------------------------------ */
 
   function el(tag, className, text) {
@@ -294,22 +301,26 @@
     return node;
   }
 
-  function isNumeric(value) {
-    return typeof value === "number" && isFinite(value);
-  }
+  function isNumeric(value) { return typeof value === "number" && isFinite(value); }
 
   function isBlank(value) {
-    return value === null || value === undefined || value === "";
+    return value === null || value === undefined ||
+      (typeof value === "string" && value.trim() === "");
   }
 
-  function formatNumber(value) {
+  function formatNumber(value, digits) {
     if (!isFinite(value)) return "";
-    return value.toLocaleString(undefined, { maximumFractionDigits: 4 });
+    return value.toLocaleString(undefined, { maximumFractionDigits: digits === undefined ? 4 : digits });
+  }
+
+  function formatDate(date) {
+    var months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    return ("0" + date.getDate()).slice(-2) + "-" + months[date.getMonth()] + "-" + date.getFullYear();
   }
 
   function formatCell(value) {
     if (isBlank(value)) return "";
-    if (value instanceof Date) return value.toISOString().slice(0, 10);
+    if (value instanceof Date) return formatDate(value);
     if (isNumeric(value)) return formatNumber(value);
     return String(value);
   }
@@ -324,18 +335,618 @@
     return text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
   }
 
+  function columnLetter(index) { // 1-based
+    var letter = "";
+    while (index > 0) {
+      var rest = (index - 1) % 26;
+      letter = String.fromCharCode(65 + rest) + letter;
+      index = Math.floor((index - 1) / 26);
+    }
+    return letter;
+  }
+
+  function daysInMonth(date) {
+    return new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
+  }
+
+  function downloadBlob(blob, filename) {
+    var url = URL.createObjectURL(blob);
+    var link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+
   /* ------------------------------------------------------------------ *
-   * report logic — shared placeholder for all four tabs
+   * reading & cleaning
    * ------------------------------------------------------------------ */
 
-  // A column is treated as numeric when it holds at least one value and every
-  // non-blank value in it is a finite number.
+  // Vertical merges carry real data down a column, so they are filled in.
+  // Horizontal merges are only presentational padding — their tail cells are
+  // left empty so the useless columns get dropped further down.
+  function fillVerticalMerges(sheet) {
+    var merges = sheet["!merges"] || [];
+
+    merges.forEach(function (merge) {
+      if (merge.e.r === merge.s.r) return;
+      var source = sheet[XLSX.utils.encode_cell({ r: merge.s.r, c: merge.s.c })];
+      if (!source) return;
+
+      for (var row = merge.s.r + 1; row <= merge.e.r; row++) {
+        sheet[XLSX.utils.encode_cell({ r: row, c: merge.s.c })] = {
+          t: source.t, v: source.v, w: source.w
+        };
+      }
+    });
+
+    delete sheet["!merges"];
+  }
+
+  function cleanHeaderText(value, index) {
+    if (isBlank(value)) return "Column " + (index + 1);
+    return String(value).replace(/\s+/g, " ").trim();
+  }
+
+  function nonBlankCount(row) {
+    var count = 0;
+    for (var i = 0; i < row.length; i++) if (!isBlank(row[i])) count++;
+    return count;
+  }
+
+  // The report title block sits above the real header, so the header is the
+  // first row that is nearly as wide as the widest row near the top.
+  function detectHeaderRow(matrix) {
+    var limit = Math.min(matrix.length, 25);
+    var widest = 0;
+
+    for (var i = 0; i < limit; i++) widest = Math.max(widest, nonBlankCount(matrix[i]));
+    if (widest < 2) return 0;
+
+    var threshold = Math.max(2, Math.ceil(widest * 0.6));
+    for (var r = 0; r < limit; r++) if (nonBlankCount(matrix[r]) >= threshold) return r;
+    return 0;
+  }
+
+  // "  2497070512   Employee Name: SHOHAG MIAH" packs two fields into one cell.
+  var NAME_IN_CODE = /^\s*(.*?)\s*Employee\s*Name\s*:\s*(.*?)\s*$/i;
+
+  function splitEmployeeColumn(headers, rows) {
+    for (var c = 0; c < headers.length; c++) {
+      var matches = 0, filled = 0;
+
+      for (var r = 0; r < rows.length; r++) {
+        var value = rows[r][c];
+        if (isBlank(value) || typeof value !== "string") continue;
+        filled++;
+        if (NAME_IN_CODE.test(value)) matches++;
+      }
+
+      if (!filled || matches / filled < 0.6) continue;
+
+      headers.splice(c + 1, 0, "Employee Name");
+      rows.forEach(function (row) {
+        var value = row[c];
+        var parts = typeof value === "string" ? value.match(NAME_IN_CODE) : null;
+        row.splice(c + 1, 0, parts ? parts[2] : "");
+        if (parts) row[c] = parts[1];
+      });
+      return true;
+    }
+    return false;
+  }
+
+  function cleanWorkbookMatrix(matrix) {
+    var headerRow = detectHeaderRow(matrix);
+    var rawHeaders = matrix[headerRow] || [];
+    var body = matrix.slice(headerRow + 1);
+    var width = rawHeaders.length;
+
+    body.forEach(function (row) { width = Math.max(width, row.length); });
+
+    // Normalise every cell: trim strings, strip the directional marks Excel
+    // exports drop into date columns.
+    var rows = body.map(function (row) {
+      var out = [];
+      for (var c = 0; c < width; c++) {
+        var value = row[c];
+        if (typeof value === "string") value = value.replace(/[‎‏]/g, "").trim();
+        out.push(value === undefined ? "" : value);
+      }
+      return out;
+    });
+
+    var headers = [];
+    for (var c = 0; c < width; c++) headers.push(rawHeaders[c]);
+
+    // Drop columns that carry neither a header nor a single value.
+    var keep = [];
+    for (var col = 0; col < width; col++) {
+      var hasHeader = !isBlank(headers[col]);
+      var hasData = rows.some(function (row) { return !isBlank(row[col]); });
+      if (hasHeader || hasData) keep.push(col);
+    }
+    var droppedColumns = width - keep.length;
+
+    headers = keep.map(function (col, index) { return cleanHeaderText(headers[col], index); });
+    rows = rows.map(function (row) { return keep.map(function (col) { return row[col]; }); });
+
+    // Drop the blank filler rows Excel exports leave at the bottom.
+    var before = rows.length;
+    rows = rows.filter(function (row) { return nonBlankCount(row) > 0; });
+
+    var splitApplied = splitEmployeeColumn(headers, rows);
+
+    return {
+      headers: headers,
+      rows: rows,
+      droppedColumns: droppedColumns,
+      droppedRows: (before - rows.length) + headerRow,
+      titleRows: headerRow,
+      splitApplied: splitApplied
+    };
+  }
+
+  function readWorkbook(file) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onerror = function () { reject(new Error("Could not read the file.")); };
+      reader.onload = function (event) {
+        try {
+          var workbook = XLSX.read(new Uint8Array(event.target.result), { type: "array", cellDates: true });
+          var sheetName = workbook.SheetNames[0];
+          if (!sheetName) throw new Error("This workbook has no sheets.");
+
+          var sheet = workbook.Sheets[sheetName];
+          fillVerticalMerges(sheet);
+
+          var matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "", blankrows: true, raw: true });
+          if (!matrix.length) throw new Error("The first sheet (“" + sheetName + "”) is empty.");
+
+          var cleaned = cleanWorkbookMatrix(matrix);
+          if (!cleaned.headers.length) throw new Error("No usable columns were found in “" + sheetName + "”.");
+
+          cleaned.sheetName = sheetName;
+          resolve(cleaned);
+        } catch (error) {
+          reject(error);
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    });
+  }
+
+  /* ------------------------------------------------------------------ *
+   * value coercion: dates and hours
+   * ------------------------------------------------------------------ */
+
+  function parseDateValue(value, dayFirst) {
+    if (value instanceof Date) return value;
+    if (typeof value !== "string") return null;
+
+    var parts = value.trim().match(/^(\d{1,4})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/);
+    if (!parts) return null;
+
+    var a = parseInt(parts[1], 10), b = parseInt(parts[2], 10), year = parseInt(parts[3], 10);
+    if (parts[1].length === 4) { year = a; a = b; b = parseInt(parts[3], 10); }
+    if (year < 100) year += year < 70 ? 2000 : 1900;
+
+    var day = dayFirst ? a : b;
+    var month = dayFirst ? b : a;
+    if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+
+    var date = new Date(year, month - 1, day);
+    return isNaN(date.getTime()) ? null : date;
+  }
+
+  // "7/1/2026" is ambiguous; only a value above 12 in either slot settles it.
+  function detectDayFirst(values) {
+    for (var i = 0; i < values.length; i++) {
+      var parts = typeof values[i] === "string" &&
+        values[i].trim().match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.]\d{2,4}$/);
+      if (!parts) continue;
+      if (parseInt(parts[1], 10) > 12) return true;
+      if (parseInt(parts[2], 10) > 12) return false;
+    }
+    return false;
+  }
+
+  function parseHoursValue(value) {
+    if (isNumeric(value)) return value;
+
+    if (value instanceof Date) {
+      return value.getHours() + value.getMinutes() / 60 + value.getSeconds() / 3600;
+    }
+
+    if (typeof value === "string") {
+      var text = value.trim();
+      if (!text) return null;
+
+      var clock = text.match(/^(\d{1,3}):([0-5]\d)(?::([0-5]\d))?$/);
+      if (clock) {
+        return parseInt(clock[1], 10) + parseInt(clock[2], 10) / 60 +
+          (clock[3] ? parseInt(clock[3], 10) / 3600 : 0);
+      }
+
+      var number = parseFloat(text.replace(/,/g, ""));
+      if (isFinite(number)) return number;
+    }
+
+    return null;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * column detection
+   * ------------------------------------------------------------------ */
+
+  function findColumn(headers, patterns) {
+    for (var p = 0; p < patterns.length; p++) {
+      for (var c = 0; c < headers.length; c++) {
+        if (patterns[p].test(headers[c])) return c;
+      }
+    }
+    return -1;
+  }
+
+  function detectDateColumn(headers, rows) {
+    var byHeader = findColumn(headers, [/^date$/i, /\bdate\b/i, /^day$/i]);
+    if (byHeader >= 0) return byHeader;
+
+    for (var c = 0; c < headers.length; c++) {
+      var seen = 0, parsed = 0;
+      for (var r = 0; r < rows.length && seen < 40; r++) {
+        if (isBlank(rows[r][c])) continue;
+        seen++;
+        if (parseDateValue(rows[r][c], false)) parsed++;
+      }
+      if (seen >= 3 && parsed / seen > 0.8) return c;
+    }
+    return -1;
+  }
+
+  function detectHoursColumn(headers) {
+    return findColumn(headers, [
+      /total\s*hours/i,
+      /(actual|worked|working)\s*hours/i,
+      /^hours?$/i,
+      /regular\s*hours/i,
+      /hours/i
+    ]);
+  }
+
+  /* ------------------------------------------------------------------ *
+   * the casuals payroll model
+   * ------------------------------------------------------------------ */
+
+  var PAYROLL_COLUMNS = [
+    { key: "required", title: "Required Hours / Day", role: CALC,  format: "0.00" },
+    { key: "pct",      title: "Hours Completion %",   role: CALC,  format: "0.0%" },
+    { key: "monthly",  title: "Monthly Salary",       role: INPUT, format: "#,##0.00" },
+    { key: "days",     title: "Days in Month",        role: CALC,  format: "0" },
+    { key: "daily",    title: "Daily Salary",         role: CALC,  format: "#,##0.00" },
+    { key: "payment",  title: "Payment for Day",      role: CALC,  format: "#,##0.00" },
+    { key: "incentive",title: "Incentive (+)",        role: INPUT, format: "#,##0.00" },
+    { key: "deduction",title: "Deduction (-)",        role: INPUT, format: "#,##0.00" },
+    { key: "note",     title: "Adjustment Note",      role: INPUT, format: null },
+    { key: "net",      title: "Net Payable",          role: CALC,  format: "#,##0.00" }
+  ];
+
+  function payrollIndex(key) {
+    for (var i = 0; i < PAYROLL_COLUMNS.length; i++) if (PAYROLL_COLUMNS[i].key === key) return i;
+    return -1;
+  }
+
+  // Normalises the source columns and works out everything that can be known
+  // without the monthly salary the user still has to type in.
+  function buildCasualsModel(cleaned, mapping) {
+    var headers = cleaned.headers.slice();
+    var rows = cleaned.rows.map(function (row) { return row.slice(); });
+
+    var dateIndex = mapping.dateIndex;
+    var hoursIndex = mapping.hoursIndex;
+    var required = mapping.requiredHours;
+
+    var datesParsed = 0, hoursConverted = 0;
+
+    if (dateIndex >= 0) {
+      var dayFirst = detectDayFirst(rows.map(function (row) { return row[dateIndex]; }));
+      rows.forEach(function (row) {
+        var parsed = parseDateValue(row[dateIndex], dayFirst);
+        if (parsed) { row[dateIndex] = parsed; datesParsed++; }
+      });
+    }
+
+    if (hoursIndex >= 0) {
+      rows.forEach(function (row) {
+        var value = row[hoursIndex];
+        if (isBlank(value) || isNumeric(value)) return;
+        var hours = parseHoursValue(value);
+        if (hours !== null) { row[hoursIndex] = hours; hoursConverted++; }
+      });
+    }
+
+    // Values we can already compute, shown in the preview and used for stats.
+    var computed = rows.map(function (row) {
+      var hours = hoursIndex >= 0 && isNumeric(row[hoursIndex]) ? row[hoursIndex] : 0;
+      var date = dateIndex >= 0 && row[dateIndex] instanceof Date ? row[dateIndex] : null;
+      return {
+        pct: required > 0 ? hours / required : null,
+        days: date ? daysInMonth(date) : null,
+        hours: hours,
+        date: date
+      };
+    });
+
+    return {
+      headers: headers,
+      rows: rows,
+      computed: computed,
+      dateIndex: dateIndex,
+      hoursIndex: hoursIndex,
+      requiredHours: required,
+      datesParsed: datesParsed,
+      hoursConverted: hoursConverted,
+      sourceCount: headers.length
+    };
+  }
+
+  function summariseCasuals(model, cleaned) {
+    var employeeIndex = findColumn(model.headers, [/employee\s*code/i, /employee\s*id/i, /^code$/i, /badge/i]);
+    var statusIndex = findColumn(model.headers, [/^status$/i]);
+
+    var employees = {}, days = {}, totalHours = 0, pctSum = 0, pctCount = 0, below = 0, absent = 0;
+
+    model.rows.forEach(function (row, index) {
+      var info = model.computed[index];
+      if (employeeIndex >= 0 && !isBlank(row[employeeIndex])) employees[String(row[employeeIndex])] = true;
+      if (info.date) days[info.date.getTime()] = true;
+      totalHours += info.hours;
+      if (info.pct !== null) {
+        pctSum += info.pct;
+        pctCount++;
+        if (info.pct < 1) below++;
+      }
+      if (statusIndex >= 0 && /absent/i.test(String(row[statusIndex]))) absent++;
+    });
+
+    var dayKeys = Object.keys(days).map(Number).sort(function (a, b) { return a - b; });
+
+    return {
+      rowCount: model.rows.length,
+      employeeCount: Object.keys(employees).length,
+      dayCount: dayKeys.length,
+      firstDay: dayKeys.length ? new Date(dayKeys[0]) : null,
+      lastDay: dayKeys.length ? new Date(dayKeys[dayKeys.length - 1]) : null,
+      totalHours: totalHours,
+      averagePct: pctCount ? pctSum / pctCount : null,
+      belowTarget: below,
+      absentDays: absent,
+      droppedColumns: cleaned.droppedColumns,
+      titleRows: cleaned.titleRows
+    };
+  }
+
+  /* ------------------------------------------------------------------ *
+   * workbook export (ExcelJS — styles, formulas, Aptos)
+   * ------------------------------------------------------------------ */
+
+  var THIN = { style: "thin", color: { argb: "FFD8E0DB" } };
+  var BORDER = { top: THIN, left: THIN, bottom: THIN, right: THIN };
+
+  function headerStyle(role) {
+    return {
+      font: { name: "Aptos", size: 11, bold: true, color: { argb: "FFFFFFFF" } },
+      fill: { type: "pattern", pattern: "solid", fgColor: { argb: THEME[role].header } },
+      alignment: { vertical: "middle", horizontal: "center", wrapText: true },
+      border: BORDER
+    };
+  }
+
+  function bodyStyle(role, format) {
+    var style = {
+      font: { name: "Aptos", size: 11 },
+      alignment: { vertical: "middle" },
+      border: BORDER
+    };
+    if (format) style.numFmt = format;
+    if (THEME[role].body) {
+      style.fill = { type: "pattern", pattern: "solid", fgColor: { argb: THEME[role].body } };
+    }
+    return style;
+  }
+
+  function measureWidth(title, rows, index) {
+    var width = String(title).length + 4;
+    var limit = Math.min(rows.length, 200);
+    for (var r = 0; r < limit; r++) {
+      var value = rows[r][index];
+      var length = value instanceof Date ? 12 : String(value === undefined ? "" : value).length;
+      width = Math.max(width, length + 2);
+    }
+    return Math.min(Math.max(width, 10), 42);
+  }
+
+  function buildCasualsWorkbook(model, stats, meta) {
+    var workbook = new ExcelJS.Workbook();
+    workbook.creator = "Reports Generator";
+    workbook.created = new Date();
+    workbook.calcProperties.fullCalcOnLoad = true;
+
+    var sheet = workbook.addWorksheet("Casuals Detailed Report", {
+      views: [{ state: "frozen", ySplit: 1, xSplit: Math.min(2, model.sourceCount) }],
+      properties: { defaultRowHeight: 18 }
+    });
+
+    var source = model.sourceCount;
+    var letters = {};
+    PAYROLL_COLUMNS.forEach(function (column, index) {
+      letters[column.key] = columnLetter(source + index + 1);
+    });
+
+    var dateLetter = model.dateIndex >= 0 ? columnLetter(model.dateIndex + 1) : null;
+    var hoursLetter = model.hoursIndex >= 0 ? columnLetter(model.hoursIndex + 1) : null;
+
+    // Column definitions carry the default style, so body cells inherit
+    // Aptos / number format / tint without touching them one by one.
+    var columns = model.headers.map(function (title, index) {
+      var format = null;
+      if (index === model.dateIndex) format = "dd-mmm-yyyy";
+      else if (index === model.hoursIndex) format = "0.00";
+      else if (/hours/i.test(title)) format = "0.00";
+      return { header: title, width: measureWidth(title, model.rows, index), style: bodyStyle(SOURCE, format) };
+    });
+
+    PAYROLL_COLUMNS.forEach(function (column) {
+      columns.push({
+        header: column.title,
+        width: Math.max(column.title.length + 4, 14),
+        style: bodyStyle(column.role, column.format)
+      });
+    });
+
+    sheet.columns = columns;
+
+    model.rows.forEach(function (row, index) {
+      var line = row.slice();
+      var excelRow = index + 2;
+
+      var pct = hoursLetter
+        ? { formula: "IF(" + letters.required + excelRow + "=0,\"\",N(" + hoursLetter + excelRow + ")/" + letters.required + excelRow + ")" }
+        : null;
+
+      var days = dateLetter
+        ? { formula: "IF(" + dateLetter + excelRow + "=\"\",\"\",DAY(EOMONTH(" + dateLetter + excelRow + ",0)))" }
+        : null;
+
+      line.push(model.requiredHours);
+      line.push(pct);
+      line.push(null); // Monthly Salary — filled in by the user
+      line.push(days);
+      line.push({ formula: "IF(OR(" + letters.monthly + excelRow + "=\"\"," + letters.days + excelRow + "=\"\"),\"\"," + letters.monthly + excelRow + "/" + letters.days + excelRow + ")" });
+      line.push({ formula: "IF(OR(" + letters.daily + excelRow + "=\"\"," + letters.pct + excelRow + "=\"\"),\"\"," + letters.daily + excelRow + "*" + letters.pct + excelRow + ")" });
+      line.push(null); // Incentive
+      line.push(null); // Deduction
+      line.push(null); // Adjustment Note
+      line.push({ formula: "IF(AND(" + letters.payment + excelRow + "=\"\"," + letters.incentive + excelRow + "=\"\"," + letters.deduction + excelRow + "=\"\"),\"\",SUM(" + letters.payment + excelRow + "," + letters.incentive + excelRow + ")-SUM(" + letters.deduction + excelRow + "))" });
+
+      sheet.addRow(line);
+    });
+
+    // Header row: one explicit style per column, colour-coded by role.
+    var headerRow = sheet.getRow(1);
+    headerRow.height = 32;
+    model.headers.forEach(function (title, index) {
+      headerRow.getCell(index + 1).style = headerStyle(SOURCE);
+    });
+    PAYROLL_COLUMNS.forEach(function (column, index) {
+      headerRow.getCell(source + index + 1).style = headerStyle(column.role);
+    });
+
+    var lastRow = model.rows.length + 1;
+    var lastColumn = columnLetter(source + PAYROLL_COLUMNS.length);
+
+    sheet.autoFilter = {
+      from: { row: 1, column: 1 },
+      to: { row: lastRow, column: source + PAYROLL_COLUMNS.length }
+    };
+
+    if (lastRow > 1) {
+      sheet.addConditionalFormatting({
+        ref: letters.pct + "2:" + letters.pct + lastRow,
+        rules: [
+          {
+            type: "cellIs", operator: "lessThan", formulae: ["1"], priority: 1,
+            style: { font: { color: { argb: "FF991B1B" } }, fill: { type: "pattern", pattern: "solid", bgColor: { argb: "FFFEE2E2" } } }
+          },
+          {
+            type: "cellIs", operator: "greaterThanOrEqual", formulae: ["1"], priority: 2,
+            style: { font: { color: { argb: "FF166534" } }, fill: { type: "pattern", pattern: "solid", bgColor: { argb: "FFDCFCE7" } } }
+          }
+        ]
+      });
+    }
+
+    buildSummarySheet(workbook, model, stats, meta, letters, lastRow, lastColumn);
+    return workbook;
+  }
+
+  function buildSummarySheet(workbook, model, stats, meta, letters, lastRow, lastColumn) {
+    var sheet = workbook.addWorksheet("Summary", { properties: { defaultRowHeight: 18 } });
+    sheet.columns = [
+      { width: 30, style: { font: { name: "Aptos", size: 11 } } },
+      { width: 30, style: { font: { name: "Aptos", size: 11 } } }
+    ];
+
+    function section(title) {
+      var row = sheet.addRow([title, ""]);
+      row.getCell(1).style = {
+        font: { name: "Aptos", size: 12, bold: true, color: { argb: "FFFFFFFF" } },
+        fill: { type: "pattern", pattern: "solid", fgColor: { argb: THEME.source.header } },
+        alignment: { vertical: "middle" }
+      };
+      row.getCell(2).style = {
+        fill: { type: "pattern", pattern: "solid", fgColor: { argb: THEME.source.header } }
+      };
+      row.height = 22;
+    }
+
+    function line(label, value, format) {
+      var row = sheet.addRow([label, value]);
+      row.getCell(1).font = { name: "Aptos", size: 11, bold: true };
+      row.getCell(2).font = { name: "Aptos", size: 11 };
+      if (format) row.getCell(2).numFmt = format;
+    }
+
+    section("Report");
+    line("Report", "Casuals Detailed Report");
+    line("Source file", meta.fileName);
+    line("Source sheet", meta.sheetName);
+    line("Generated", new Date().toLocaleString());
+
+    sheet.addRow([]);
+    section("Timesheet");
+    line("Day records", stats.rowCount);
+    line("Employees", stats.employeeCount);
+    line("Days covered", stats.dayCount);
+    if (stats.firstDay) line("Period", formatDate(stats.firstDay) + "  to  " + formatDate(stats.lastDay));
+    line("Required hours / day", model.requiredHours, "0.00");
+    line("Total actual hours", stats.totalHours, "#,##0.00");
+    if (stats.averagePct !== null) line("Average completion", stats.averagePct, "0.0%");
+    line("Days below target", stats.belowTarget);
+    line("Absent days", stats.absentDays);
+
+    sheet.addRow([]);
+    section("Cleanup applied");
+    line("Title rows removed", stats.titleRows);
+    line("Empty columns removed", stats.droppedColumns);
+    line("Dates converted", model.datesParsed);
+    line("Merged cells", "unmerged");
+
+    sheet.addRow([]);
+    section("Payroll totals");
+    line("Total payment for days", { formula: "SUM('Casuals Detailed Report'!" + letters.payment + "2:" + letters.payment + lastRow + ")" }, "#,##0.00");
+    line("Total incentives", { formula: "SUM('Casuals Detailed Report'!" + letters.incentive + "2:" + letters.incentive + lastRow + ")" }, "#,##0.00");
+    line("Total deductions", { formula: "SUM('Casuals Detailed Report'!" + letters.deduction + "2:" + letters.deduction + lastRow + ")" }, "#,##0.00");
+    line("Total net payable", { formula: "SUM('Casuals Detailed Report'!" + letters.net + "2:" + letters.net + lastRow + ")" }, "#,##0.00");
+
+    sheet.addRow([]);
+    section("How to use");
+    line("Step 1", "Fill the Monthly Salary column (amber).");
+    line("Step 2", "Daily Salary, Payment and Net Payable calculate themselves.");
+    line("Step 3", "Add Incentive / Deduction and a note where needed.");
+  }
+
+  /* ------------------------------------------------------------------ *
+   * placeholder report used by the three remaining tabs
+   * ------------------------------------------------------------------ */
+
   function findNumericColumns(headers, rows) {
     var numeric = [];
 
     headers.forEach(function (header, index) {
-      var values = [];
-      var clean = true;
+      var values = [], clean = true;
 
       for (var r = 0; r < rows.length; r++) {
         var value = rows[r][index];
@@ -361,42 +972,81 @@
     }
 
     return {
-      header: column.header,
-      count: column.values.length,
-      sum: sum,
-      average: sum / column.values.length,
-      min: min,
-      max: max
+      header: column.header, count: column.values.length, sum: sum,
+      average: sum / column.values.length, min: min, max: max
     };
   }
 
-  function buildReport(state) {
-    var numericColumns = findNumericColumns(state.headers, state.rows);
-
+  function buildBasicReport(cleaned) {
+    var numericColumns = findNumericColumns(cleaned.headers, cleaned.rows);
     return {
-      rowCount: state.rows.length,
-      columnCount: state.headers.length,
+      rowCount: cleaned.rows.length,
+      columnCount: cleaned.headers.length,
       numericCount: numericColumns.length,
       columns: numericColumns.map(summarise)
     };
   }
 
+  function buildBasicWorkbook(tab, cleaned, report, meta) {
+    var workbook = new ExcelJS.Workbook();
+    workbook.creator = "Reports Generator";
+
+    var summary = workbook.addWorksheet("Summary");
+    summary.columns = [
+      { width: 30, style: { font: { name: "Aptos", size: 11 } } },
+      { width: 14, style: { font: { name: "Aptos", size: 11 } } },
+      { width: 16, style: { font: { name: "Aptos", size: 11 } } },
+      { width: 16, style: { font: { name: "Aptos", size: 11 } } },
+      { width: 14, style: { font: { name: "Aptos", size: 11 } } },
+      { width: 14, style: { font: { name: "Aptos", size: 11 } } }
+    ];
+
+    [["Report", tab.title], ["Source file", meta.fileName], ["Source sheet", meta.sheetName],
+     ["Generated", new Date().toLocaleString()], [], ["Rows", report.rowCount],
+     ["Columns", report.columnCount], ["Numeric fields", report.numericCount], []
+    ].forEach(function (row) {
+      var added = summary.addRow(row);
+      added.getCell(1).font = { name: "Aptos", size: 11, bold: true };
+    });
+
+    var head = summary.addRow(["Column", "Count", "Sum", "Average", "Min", "Max"]);
+    head.eachCell(function (cell) { cell.style = headerStyle(SOURCE); });
+
+    report.columns.forEach(function (column) {
+      summary.addRow([column.header, column.count, column.sum, column.average, column.min, column.max]);
+    });
+
+    var data = workbook.addWorksheet("Data");
+    data.columns = cleaned.headers.map(function (title, index) {
+      return { header: title, width: measureWidth(title, cleaned.rows, index), style: bodyStyle(SOURCE, null) };
+    });
+    cleaned.rows.forEach(function (row) { data.addRow(row); });
+    data.getRow(1).eachCell(function (cell) { cell.style = headerStyle(SOURCE); });
+    data.views = [{ state: "frozen", ySplit: 1 }];
+
+    return workbook;
+  }
+
   /* ------------------------------------------------------------------ *
-   * one tab panel
+   * panel
    * ------------------------------------------------------------------ */
 
   function createPanel(tab) {
-    var state = { fileName: "", sheetName: "", headers: [], rows: [], report: null };
+    var state = {
+      fileName: "", cleaned: null, model: null, stats: null, report: null, enhanced: null
+    };
 
     var panel = el("section", "panel");
     panel.id = "panel-" + tab.id;
     panel.setAttribute("role", "tabpanel");
     panel.setAttribute("aria-labelledby", "tab-" + tab.id);
 
-    /* ---- upload card ---- */
+    /* ---- upload ---- */
     var uploadCard = el("div", "card");
     uploadCard.appendChild(el("h2", null, tab.title));
-    uploadCard.appendChild(el("p", "sub", "Upload an Excel workbook (.xlsx or .xls). The first sheet is read."));
+    uploadCard.appendChild(el("p", "sub", tab.mode === "casuals"
+      ? "Upload the casual employees timesheet (.xlsx or .xls). The first sheet is read, cleaned and turned into a payroll-ready report."
+      : "Upload an Excel workbook (.xlsx or .xls). The first sheet is read."));
 
     var drop = el("div", "drop");
     drop.tabIndex = 0;
@@ -409,7 +1059,7 @@
 
     var input = el("input");
     input.type = "file";
-    input.accept = ".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel";
+    input.accept = ".xlsx,.xls,.xlsm,.xlsb";
     drop.appendChild(input);
     uploadCard.appendChild(drop);
 
@@ -437,62 +1087,115 @@
     uploadCard.appendChild(actions);
     panel.appendChild(uploadCard);
 
-    /* ---- preview card ---- */
+    /* ---- mapping (casuals only) ---- */
+    var mappingCard, dateSelect, hoursSelect, requiredInput, cleanupNotes, mappingAlert;
+
+    if (tab.mode === "casuals") {
+      mappingCard = el("div", "card");
+      mappingCard.hidden = true;
+      mappingCard.appendChild(el("h2", null, "Cleanup & column mapping"));
+      mappingCard.appendChild(el("p", "sub", "Detected automatically — change anything that looks wrong, then generate."));
+
+      var fields = el("div", "fields");
+
+      function field(labelText, control) {
+        var wrapper = el("div", "field");
+        var label = el("label", null, labelText);
+        label.htmlFor = control.id;
+        wrapper.appendChild(label);
+        wrapper.appendChild(control);
+        fields.appendChild(wrapper);
+        return control;
+      }
+
+      dateSelect = el("select");
+      dateSelect.id = "date-" + tab.id;
+      field("Date column", dateSelect);
+
+      hoursSelect = el("select");
+      hoursSelect.id = "hours-" + tab.id;
+      field("Actual hours column", hoursSelect);
+
+      requiredInput = el("input");
+      requiredInput.id = "required-" + tab.id;
+      requiredInput.type = "number";
+      requiredInput.min = "0";
+      requiredInput.step = "0.5";
+      requiredInput.value = String(DEFAULT_REQUIRED_HOURS);
+      field("Required hours per day", requiredInput);
+
+      mappingCard.appendChild(fields);
+
+      mappingAlert = el("div", "alert warn");
+      mappingCard.appendChild(mappingAlert);
+
+      cleanupNotes = el("ul", "notes");
+      mappingCard.appendChild(cleanupNotes);
+      panel.appendChild(mappingCard);
+    }
+
+    /* ---- preview ---- */
     var previewCard = el("div", "card");
     previewCard.appendChild(el("h2", null, "Data preview"));
-    previewCard.appendChild(el("p", "sub", "First " + PREVIEW_ROWS + " rows of the uploaded sheet."));
+    var previewSub = el("p", "sub", "First " + PREVIEW_ROWS + " rows of the cleaned sheet.");
+    previewCard.appendChild(previewSub);
     var previewBody = el("div");
     previewBody.appendChild(el("div", "empty", "No file loaded yet."));
     previewCard.appendChild(previewBody);
     panel.appendChild(previewCard);
 
-    /* ---- report card ---- */
+    /* ---- report ---- */
     var reportCard = el("div", "card");
     reportCard.appendChild(el("h2", null, "Report"));
-    reportCard.appendChild(el("p", "sub", "Summary statistics for every numeric column."));
+    reportCard.appendChild(el("p", "sub", tab.mode === "casuals"
+      ? "Attendance and payroll overview for the uploaded period."
+      : "Summary statistics for every numeric column."));
     var reportBody = el("div");
     reportBody.appendChild(el("div", "empty", "Generate a report to see the summary."));
     reportCard.appendChild(reportBody);
     panel.appendChild(reportCard);
 
-    /* ---- rendering ---- */
+    /* ---- messaging ---- */
 
     function showError(message) {
+      alert.className = "alert show";
       alert.textContent = message;
-      alert.classList.add("show");
     }
 
     function clearError() {
+      alert.className = "alert";
       alert.textContent = "";
-      alert.classList.remove("show");
     }
 
-    function renderPreview() {
-      previewBody.innerHTML = "";
+    /* ---- preview rendering ---- */
 
-      if (!state.headers.length) {
-        previewBody.appendChild(el("div", "empty", "No file loaded yet."));
-        return;
-      }
-
-      var visible = state.rows.slice(0, PREVIEW_ROWS);
+    function renderTable(headers, rows, roleAt, classAt) {
       var scroll = el("div", "table-scroll");
       var table = el("table");
 
       var thead = el("thead");
       var headRow = el("tr");
-      state.headers.forEach(function (header) {
-        headRow.appendChild(el("th", null, header));
+      headers.forEach(function (header, index) {
+        var role = roleAt ? roleAt(index) : SOURCE;
+        headRow.appendChild(el("th", role === CALC ? "h-calc" : role === INPUT ? "h-input" : null, header));
       });
       thead.appendChild(headRow);
       table.appendChild(thead);
 
       var tbody = el("tbody");
-      visible.forEach(function (row) {
+      rows.slice(0, PREVIEW_ROWS).forEach(function (row, rowIndex) {
         var tr = el("tr");
-        for (var c = 0; c < state.headers.length; c++) {
+        for (var c = 0; c < headers.length; c++) {
           var value = row[c];
-          var td = el("td", isNumeric(value) ? "num" : null, formatCell(value));
+          var role = roleAt ? roleAt(c) : SOURCE;
+          var className = isNumeric(value) ? "num" : "";
+          if (role === CALC) className += " c-calc";
+          if (role === INPUT) className += " c-input";
+          if (classAt) {
+            var extra = classAt(rowIndex, c);
+            if (extra) className += " " + extra;
+          }
+          var td = el("td", className.trim() || null, formatCell(value));
           td.title = td.textContent;
           tr.appendChild(td);
         }
@@ -501,12 +1204,126 @@
       table.appendChild(tbody);
 
       scroll.appendChild(table);
-      previewBody.appendChild(scroll);
-      previewBody.appendChild(el("div", "hint",
-        "Showing " + visible.length + " of " + state.rows.length + " rows · sheet “" + state.sheetName + "”"));
+      return scroll;
     }
 
-    function renderReport() {
+    function renderBasicPreview() {
+      previewBody.innerHTML = "";
+      if (!state.cleaned) {
+        previewBody.appendChild(el("div", "empty", "No file loaded yet."));
+        return;
+      }
+      previewBody.appendChild(renderTable(state.cleaned.headers, state.cleaned.rows));
+      previewBody.appendChild(el("div", "hint",
+        "Showing " + Math.min(PREVIEW_ROWS, state.cleaned.rows.length) + " of " +
+        state.cleaned.rows.length + " rows · sheet “" + state.cleaned.sheetName + "”"));
+    }
+
+    function renderCasualsPreview() {
+      previewBody.innerHTML = "";
+
+      if (!state.model) {
+        renderBasicPreview();
+        return;
+      }
+
+      var model = state.model;
+      var headers = model.headers.concat(PAYROLL_COLUMNS.map(function (column) { return column.title; }));
+      var pctColumn = model.sourceCount + payrollIndex("pct");
+
+      var rows = model.rows.map(function (row, index) {
+        var info = model.computed[index];
+        return row.concat([
+          model.requiredHours,
+          info.pct,
+          "",            // Monthly Salary
+          info.days,
+          "",            // Daily Salary
+          "",            // Payment for Day
+          "", "", "",    // Incentive / Deduction / Note
+          ""             // Net Payable
+        ]);
+      });
+
+      function roleAt(index) {
+        if (index < model.sourceCount) return SOURCE;
+        return PAYROLL_COLUMNS[index - model.sourceCount].role;
+      }
+
+      function classAt(rowIndex, columnIndex) {
+        if (columnIndex !== pctColumn) return "";
+        var pct = model.computed[rowIndex].pct;
+        if (pct === null) return "";
+        return pct < 1 ? "under" : "met";
+      }
+
+      // The percentage is shown as a percentage, not a raw ratio.
+      var display = rows.map(function (row) {
+        var copy = row.slice();
+        if (copy[pctColumn] !== null && copy[pctColumn] !== "") {
+          copy[pctColumn] = (copy[pctColumn] * 100).toFixed(1) + "%";
+        }
+        return copy;
+      });
+
+      previewBody.appendChild(renderTable(headers, display, roleAt, classAt));
+
+      var legend = el("div", "legend");
+      [["#16a34a", "Cleaned source data"], ["#0d9488", "Calculated by formula"], ["#d97706", "You fill this in"]]
+        .forEach(function (pair) {
+          var item = el("span");
+          var swatch = el("i");
+          swatch.style.background = pair[0];
+          item.appendChild(swatch);
+          item.appendChild(el("span", null, pair[1]));
+          legend.appendChild(item);
+        });
+      previewBody.appendChild(legend);
+
+      previewBody.appendChild(el("div", "hint",
+        "Showing " + Math.min(PREVIEW_ROWS, rows.length) + " of " + rows.length + " rows. " +
+        "Monthly Salary is empty on purpose — once you type it in the downloaded file, Daily Salary, " +
+        "Payment for Day and Net Payable calculate themselves."));
+    }
+
+    /* ---- report rendering ---- */
+
+    function statBlock(pairs) {
+      var stats = el("div", "stats");
+      pairs.forEach(function (pair) {
+        var box = el("div", "stat");
+        box.appendChild(el("div", "label", pair[0]));
+        box.appendChild(el("div", "value", pair[1]));
+        stats.appendChild(box);
+      });
+      return stats;
+    }
+
+    function renderCasualsReport() {
+      reportBody.innerHTML = "";
+      if (!state.stats) {
+        reportBody.appendChild(el("div", "empty", "Generate a report to see the summary."));
+        return;
+      }
+
+      var stats = state.stats;
+      reportBody.appendChild(statBlock([
+        ["Day records", stats.rowCount.toLocaleString()],
+        ["Employees", stats.employeeCount.toLocaleString()],
+        ["Days covered", stats.dayCount.toLocaleString()],
+        ["Total hours", formatNumber(stats.totalHours, 2)],
+        ["Avg completion", stats.averagePct === null ? "—" : (stats.averagePct * 100).toFixed(1) + "%"],
+        ["Days below target", stats.belowTarget.toLocaleString()]
+      ]));
+
+      var lines = [];
+      if (stats.firstDay) lines.push("Period: " + formatDate(stats.firstDay) + " to " + formatDate(stats.lastDay));
+      lines.push("Absent days: " + stats.absentDays.toLocaleString());
+      lines.push("Required hours per day: " + state.model.requiredHours);
+      reportBody.appendChild(el("div", "hint", lines.join(" · ")));
+    }
+
+    function renderBasicReport() {
       reportBody.innerHTML = "";
 
       if (!state.report) {
@@ -514,49 +1331,82 @@
         return;
       }
 
-      var stats = el("div", "stats");
-      [
-        ["Rows", state.report.rowCount],
-        ["Columns", state.report.columnCount],
-        ["Numeric fields", state.report.numericCount]
-      ].forEach(function (pair) {
-        var box = el("div", "stat");
-        box.appendChild(el("div", "label", pair[0]));
-        box.appendChild(el("div", "value", pair[1].toLocaleString()));
-        stats.appendChild(box);
-      });
-      reportBody.appendChild(stats);
+      reportBody.appendChild(statBlock([
+        ["Rows", state.report.rowCount.toLocaleString()],
+        ["Columns", state.report.columnCount.toLocaleString()],
+        ["Numeric fields", state.report.numericCount.toLocaleString()]
+      ]));
 
       if (!state.report.columns.length) {
         reportBody.appendChild(el("div", "empty", "No numeric columns were found in this sheet."));
         return;
       }
 
-      var scroll = el("div", "table-scroll");
-      var table = el("table");
-      var thead = el("thead");
-      var headRow = el("tr");
-      ["Column", "Count", "Sum", "Average", "Min", "Max"].forEach(function (label) {
-        headRow.appendChild(el("th", null, label));
+      var headers = ["Column", "Count", "Sum", "Average", "Min", "Max"];
+      var rows = state.report.columns.map(function (column) {
+        return [column.header, column.count, column.sum, column.average, column.min, column.max];
       });
-      thead.appendChild(headRow);
-      table.appendChild(thead);
 
-      var tbody = el("tbody");
-      state.report.columns.forEach(function (column) {
-        var tr = el("tr");
-        tr.appendChild(el("td", null, column.header));
-        [column.count, column.sum, column.average, column.min, column.max].forEach(function (value) {
-          tr.appendChild(el("td", "num", formatNumber(value)));
-        });
-        tbody.appendChild(tr);
-      });
-      table.appendChild(tbody);
-
-      scroll.appendChild(table);
-      reportBody.appendChild(scroll);
+      reportBody.appendChild(renderTable(headers, rows));
       reportBody.appendChild(el("div", "hint",
-        "Placeholder logic — the same summary runs on every tab until each report’s rules are defined."));
+        "Placeholder logic — this tab keeps the generic summary until its own rules are defined."));
+    }
+
+    /* ---- mapping ---- */
+
+    function fillSelect(select, headers, selectedIndex, allowNone) {
+      select.innerHTML = "";
+      if (allowNone) {
+        var none = el("option", null, "— none —");
+        none.value = "-1";
+        select.appendChild(none);
+      }
+      headers.forEach(function (header, index) {
+        var option = el("option", null, header);
+        option.value = String(index);
+        select.appendChild(option);
+      });
+      select.value = String(selectedIndex);
+    }
+
+    function renderMapping() {
+      var cleaned = state.cleaned;
+      var dateIndex = detectDateColumn(cleaned.headers, cleaned.rows);
+      var hoursIndex = detectHoursColumn(cleaned.headers);
+
+      fillSelect(dateSelect, cleaned.headers, dateIndex, true);
+      fillSelect(hoursSelect, cleaned.headers, hoursIndex, true);
+
+      cleanupNotes.innerHTML = "";
+      var notes = [];
+      if (cleaned.titleRows) notes.push("Removed " + cleaned.titleRows + " title row" + (cleaned.titleRows === 1 ? "" : "s") + " above the header");
+      if (cleaned.droppedColumns) notes.push("Removed " + cleaned.droppedColumns + " empty column" + (cleaned.droppedColumns === 1 ? "" : "s"));
+      notes.push("Merged cells flattened");
+      if (cleaned.splitApplied) notes.push("Split employee code and employee name into separate columns");
+      notes.push("Headers cleaned and line breaks removed");
+      notes.forEach(function (note) { cleanupNotes.appendChild(el("li", null, note)); });
+
+      var warnings = [];
+      if (dateIndex < 0) warnings.push("no date column");
+      if (hoursIndex < 0) warnings.push("no actual hours column");
+      if (warnings.length) {
+        mappingAlert.className = "alert warn show";
+        mappingAlert.textContent = "Could not detect " + warnings.join(" and ") +
+          " — pick the right column above, otherwise the related calculations stay empty.";
+      } else {
+        mappingAlert.className = "alert warn";
+        mappingAlert.textContent = "";
+      }
+
+      mappingCard.hidden = false;
+    }
+
+    function readMapping() {
+      return {
+        dateIndex: parseInt(dateSelect.value, 10),
+        hoursIndex: parseInt(hoursSelect.value, 10),
+        requiredHours: parseFloat(requiredInput.value) || 0
+      };
     }
 
     /* ---- file handling ---- */
@@ -564,8 +1414,8 @@
     function handleFile(file) {
       if (!file) return;
 
-      if (typeof XLSX === "undefined") {
-        showError("The Excel library could not be loaded. Check your internet connection and reload the page.");
+      if (typeof XLSX === "undefined" || typeof ExcelJS === "undefined") {
+        showError("The Excel libraries could not be loaded. Check your internet connection and reload the page.");
         return;
       }
 
@@ -575,63 +1425,31 @@
       }
 
       clearError();
+      fileName.textContent = file.name;
+      fileMeta.textContent = "reading…";
+      filebar.classList.add("show");
 
-      var reader = new FileReader();
+      readWorkbook(file).then(function (cleaned) {
+        state.fileName = file.name;
+        state.cleaned = cleaned;
+        state.model = null;
+        state.stats = null;
+        state.report = null;
 
-      reader.onerror = function () {
-        showError("Could not read the file. Please try again.");
-      };
+        fileMeta.textContent = formatBytes(file.size) + " · " + cleaned.rows.length +
+          " rows · " + cleaned.headers.length + " columns";
 
-      reader.onload = function (event) {
-        try {
-          var workbook = XLSX.read(new Uint8Array(event.target.result), { type: "array", cellDates: true });
-          var sheetName = workbook.SheetNames[0];
+        generateBtn.disabled = false;
+        downloadBtn.disabled = true;
 
-          if (!sheetName) {
-            showError("This workbook has no sheets.");
-            return;
-          }
-
-          var matrix = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], {
-            header: 1,
-            defval: "",
-            blankrows: false,
-            raw: true
-          });
-
-          if (!matrix.length) {
-            showError("The first sheet (“" + sheetName + "”) is empty.");
-            return;
-          }
-
-          var headerRow = matrix[0];
-          state.sheetName = sheetName;
-          state.fileName = file.name;
-          state.headers = headerRow.map(function (header, index) {
-            return isBlank(header) ? "Column " + (index + 1) : String(header);
-          });
-          state.rows = matrix.slice(1).map(function (row) {
-            var padded = [];
-            for (var c = 0; c < state.headers.length; c++) padded.push(row[c]);
-            return padded;
-          });
-          state.report = null;
-
-          fileName.textContent = file.name;
-          fileMeta.textContent = formatBytes(file.size) + " · " + state.rows.length + " rows · " + state.headers.length + " columns";
-          filebar.classList.add("show");
-
-          generateBtn.disabled = false;
-          downloadBtn.disabled = true;
-
-          renderPreview();
-          renderReport();
-        } catch (error) {
-          showError("Could not parse this workbook: " + error.message);
-        }
-      };
-
-      reader.readAsArrayBuffer(file);
+        if (tab.mode === "casuals") renderMapping();
+        renderBasicPreview();
+        reportBody.innerHTML = "";
+        reportBody.appendChild(el("div", "empty", "Generate a report to see the summary."));
+      }).catch(function (error) {
+        filebar.classList.remove("show");
+        showError(error.message || String(error));
+      });
     }
 
     drop.addEventListener("click", function () { input.click(); });
@@ -662,48 +1480,66 @@
 
     /* ---- actions ---- */
 
+    function withBusy(button, label, work) {
+      var original = button.textContent;
+      button.textContent = label;
+      button.disabled = true;
+
+      setTimeout(function () {
+        var finish = function () {
+          button.textContent = original;
+          button.disabled = false;
+        };
+        try {
+          var result = work();
+          if (result && typeof result.then === "function") result.then(finish, function (error) {
+            finish();
+            showError("Could not build the workbook: " + (error.message || error));
+          });
+          else finish();
+        } catch (error) {
+          finish();
+          showError("Something went wrong: " + (error.message || error));
+        }
+      }, 30);
+    }
+
     generateBtn.addEventListener("click", function () {
-      if (!state.headers.length) return;
+      if (!state.cleaned) return;
       clearError();
-      state.report = buildReport(state);
-      downloadBtn.disabled = false;
-      renderReport();
+
+      withBusy(generateBtn, "Generating…", function () {
+        if (tab.mode === "casuals") {
+          state.model = buildCasualsModel(state.cleaned, readMapping());
+          state.stats = summariseCasuals(state.model, state.cleaned);
+          renderCasualsPreview();
+          renderCasualsReport();
+        } else {
+          state.report = buildBasicReport(state.cleaned);
+          renderBasicPreview();
+          renderBasicReport();
+        }
+        downloadBtn.disabled = false;
+      });
     });
 
     downloadBtn.addEventListener("click", function () {
-      if (!state.report) return;
+      if (tab.mode === "casuals" ? !state.model : !state.report) return;
+      clearError();
 
-      var summary = [
-        ["Reports Generator"],
-        ["Report", tab.title],
-        ["Source file", state.fileName],
-        ["Source sheet", state.sheetName],
-        ["Generated", new Date().toLocaleString()],
-        [],
-        ["Rows", state.report.rowCount],
-        ["Columns", state.report.columnCount],
-        ["Numeric fields", state.report.numericCount],
-        [],
-        ["Column", "Count", "Sum", "Average", "Min", "Max"]
-      ];
+      withBusy(downloadBtn, "Building file…", function () {
+        var meta = { fileName: state.fileName, sheetName: state.cleaned.sheetName };
+        var workbook = tab.mode === "casuals"
+          ? buildCasualsWorkbook(state.model, state.stats, meta)
+          : buildBasicWorkbook(tab, state.cleaned, state.report, meta);
 
-      state.report.columns.forEach(function (column) {
-        summary.push([column.header, column.count, column.sum, column.average, column.min, column.max]);
+        return workbook.xlsx.writeBuffer().then(function (buffer) {
+          downloadBlob(
+            new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }),
+            slugify(tab.title) + "-enhanced.xlsx"
+          );
+        });
       });
-
-      if (!state.report.columns.length) summary.push(["No numeric columns found"]);
-
-      var summarySheet = XLSX.utils.aoa_to_sheet(summary);
-      summarySheet["!cols"] = [{ wch: 30 }, { wch: 12 }, { wch: 16 }, { wch: 16 }, { wch: 14 }, { wch: 14 }];
-
-      var dataSheet = XLSX.utils.aoa_to_sheet([state.headers].concat(state.rows));
-      dataSheet["!cols"] = state.headers.map(function () { return { wch: 18 }; });
-
-      var workbook = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(workbook, summarySheet, "Summary");
-      XLSX.utils.book_append_sheet(workbook, dataSheet, "Data");
-
-      XLSX.writeFile(workbook, slugify(tab.title) + "-enhanced.xlsx");
     });
 
     return panel;
