@@ -218,6 +218,25 @@
     td.met   { color: #86efac; }
   }
 
+  /* ---------- upload slots (report merge) ---------- */
+  .slots { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; margin-top: 14px; }
+  .slot {
+    display: flex; align-items: flex-start; gap: 10px;
+    padding: 11px 13px; border-radius: 10px;
+    border: 1px solid var(--border); background: var(--surface-2);
+    font-size: 13px;
+  }
+  .slot.filled { border-color: var(--green-200); background: var(--green-50); }
+  .slot .mark { font-weight: 700; color: var(--muted); line-height: 1.35; }
+  .slot.filled .mark { color: var(--green-600); }
+  .slot .body { min-width: 0; }
+  .slot .title { font-weight: 650; }
+  .slot .detail { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .slot .req { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--amber-600); font-weight: 600; }
+
+  .subtable { margin-top: 8px; }
+  .subtable h3 { font-size: 14px; margin: 18px 0 6px; font-weight: 650; }
+
   .legend { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 12px; font-size: 12.5px; color: var(--muted); }
   .legend span { display: flex; align-items: center; gap: 6px; }
   .legend i { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
@@ -273,7 +292,7 @@
 
   var TABS = [
     { id: "casuals-detailed", title: "Casuals Detailed Report", mode: "casuals" },
-    { id: "fte-detailed",     title: "FTE Detailed Report",     mode: "basic" },
+    { id: "fte-detailed",     title: "FTE Detailed Report",     mode: "merge" },
     { id: "casual-summary",   title: "Casual Period Summary",   mode: "basic" },
     { id: "fte-summary",      title: "FTE Period Summary",      mode: "basic" }
   ];
@@ -1060,9 +1079,714 @@
     line("Step 4", "Type into Manual OT Hours only to override the calculated OT.");
   }
 
-  /* ------------------------------------------------------------------ *
-   * placeholder report used by the three remaining tabs
-   * ------------------------------------------------------------------ */
+  /* ================================================================== *
+   * Report merge — combines the four company exports into one accurate
+   * attendance file, following the TAS column design.
+   *
+   *   TAS         (HR Works)         main attendance, one row per employee
+   *                                  per day; Employee Code is usually OLD.
+   *   Car Gate    (Speca Time&Space) access events, names only on older
+   *                                  exports — matched by name tokens.
+   *   Leaves      (Oracle Fusion)    approved absences by NEW number.
+   *   Active list (Oracle Fusion)    Old No. <-> New No. <-> Name bridge.
+   *
+   * Ported from the AIC-Attendance project; kept pure so the same fixtures
+   * verify it.
+   * ================================================================== */
+
+  var MERGE_MONTHS = {
+    jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
+    jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11
+  };
+
+  function txt(value) {
+    if (value === null || value === undefined) return "";
+    if (value instanceof Date) return value.toISOString();
+    if (typeof value === "object") {
+      if (value.richText) return value.richText.map(function (r) { return r.text; }).join("");
+      if (value.text) return value.text;
+      if (value.result !== undefined) return String(value.result);
+    }
+    return String(value).trim();
+  }
+
+  // Excel keeps dates as a serial day count. Converting through UTC keeps the
+  // calendar day stable regardless of the viewer's timezone.
+  function serialParts(serial) {
+    var days = Math.floor(serial);
+    var minutes = Math.round((serial - days) * 1440) % 1440;
+    var date = new Date(Date.UTC(1899, 11, 31) + (days > 60 ? days - 1 : days) * 86400000);
+    return {
+      year: date.getUTCFullYear(),
+      month: date.getUTCMonth() + 1,
+      day: date.getUTCDate(),
+      minutes: minutes
+    };
+  }
+
+  function isDateSerial(value) {
+    return typeof value === "number" && isFinite(value) && value > 1000 && value < 2958466;
+  }
+
+  function pad2(number) { return ("0" + number).slice(-2); }
+
+  /** '01-Jun-26' / '01-Jun-2026' / Date / Excel serial -> 'YYYY-MM-DD'. */
+  function parseDateKey(value) {
+    if (value instanceof Date) {
+      return value.getUTCFullYear() + "-" + pad2(value.getUTCMonth() + 1) + "-" + pad2(value.getUTCDate());
+    }
+    if (isDateSerial(value)) {
+      var parts = serialParts(value);
+      return parts.year + "-" + pad2(parts.month) + "-" + pad2(parts.day);
+    }
+
+    var text = txt(value).replace(/[‎‏]/g, "").trim();
+    var match = text.match(/^(\d{1,2})[-/ ]([A-Za-z]{3})[A-Za-z]*[-/ ](\d{2,4})/);
+    if (!match) return null;
+
+    var month = MERGE_MONTHS[match[2].toLowerCase()];
+    if (month === undefined) return null;
+
+    var year = match[3].length === 2 ? 2000 + Number(match[3]) : Number(match[3]);
+    return year + "-" + pad2(month + 1) + "-" + pad2(Number(match[1]));
+  }
+
+  /** 'H:MM' / 'HH:MM:SS' / Date / Excel serial -> minutes of day. */
+  function parseHm(value) {
+    if (value instanceof Date) return value.getUTCHours() * 60 + value.getUTCMinutes();
+    if (typeof value === "number" && isFinite(value)) return serialParts(value).minutes;
+
+    var match = txt(value).match(/(\d{1,2}):(\d{2})(?::(\d{2}))?\s*$/);
+    return match ? Number(match[1]) * 60 + Number(match[2]) : null;
+  }
+
+  function parseGateStamp(value) {
+    var dateKey = parseDateKey(value);
+    var minutes = parseHm(value);
+    if (!dateKey || minutes === null) return null;
+    return { dateKey: dateKey, minutes: minutes };
+  }
+
+  function fmtHm(minutes) {
+    if (minutes === null) return "";
+    var m = ((minutes % 1440) + 1440) % 1440;
+    return pad2(Math.floor(m / 60)) + ":" + pad2(m % 60);
+  }
+
+  function fmtDur(minutes) {
+    return minutes === null ? "" : Math.floor(minutes / 60) + ":" + pad2(minutes % 60);
+  }
+
+  /** TAS writes '8.14' for 8h14m (H.MM convention). 'H:MM' is also accepted. */
+  function parseTasDur(value) {
+    var text = txt(value);
+    if (!text) return null;
+
+    var clock = text.match(/^(\d{1,2}):(\d{2})$/);
+    if (clock) return Number(clock[1]) * 60 + Number(clock[2]);
+
+    var number = Number(text);
+    if (isNaN(number)) return null;
+
+    var hours = Math.floor(number);
+    return hours * 60 + Math.min(59, Math.round((number - hours) * 100));
+  }
+
+  function stripZeros(value) {
+    return txt(value).replace(/\.0+$/, "").replace(/^0+(?=\d)/, "");
+  }
+
+  function detectReportKind(matrix) {
+    var head = matrix.slice(0, 8).reduce(function (all, row) { return all.concat(row); }, [])
+      .map(txt).join(" | ").toLowerCase();
+
+    if (head.indexOf("old emp no") >= 0) return "active";
+    if (head.indexOf("absence type") >= 0 || head.indexOf("leave report") >= 0) return "leaves";
+    if (head.indexOf("event log") >= 0 ||
+        (head.indexOf("detailed access status") >= 0 && head.indexOf("user") >= 0)) return "gate";
+    if (head.indexOf("employee code") >= 0 || head.indexOf("detailed report") >= 0) return "tas";
+    return null;
+  }
+
+  function findHeaderRow(matrix, marker) {
+    for (var i = 0; i < matrix.length; i++) {
+      var row = matrix[i] || [];
+      for (var c = 0; c < row.length; c++) {
+        if (txt(row[c]).replace(/\s+/g, " ").toLowerCase().indexOf(marker) >= 0) return i;
+      }
+    }
+    return -1;
+  }
+
+  /** Header labels -> column indexes, tolerant of the line breaks TAS uses. */
+  function headerCols(row) {
+    var map = {};
+    (row || []).forEach(function (cell, index) {
+      var label = txt(cell).replace(/\s+/g, " ").trim().toLowerCase();
+      if (label && map[label] === undefined) map[label] = index;
+    });
+    return map;
+  }
+
+  function parseTas(matrix) {
+    var header = findHeaderRow(matrix, "employee code");
+    if (header < 0) return [];
+
+    var cols = headerCols(matrix[header]);
+    function col(label) { return cols[label] === undefined ? -1 : cols[label]; }
+
+    var C = {
+      empType: col("employee type"), company: col("company"), code: col("employee code"),
+      name: col("employee name"), date: col("date"), shift: col("shift code"), status: col("status"),
+      schedIn: col("scheduled in"), schedOut: col("scheduled out"),
+      timeIn: col("time in"), timeOut: col("time out"),
+      total: col("total hours"), required: col("required hours"),
+      late: col("late coming"), early: col("early departure"),
+      regular: col("regular hours"), ot: col("normal ot hrs"),
+      shortage: col("shortage hours"), holidayOt: col("holiday ot hrs")
+    };
+
+    var out = [];
+    for (var i = header + 1; i < matrix.length; i++) {
+      var r = matrix[i] || [];
+      var code = stripZeros(r[C.code]);
+      var dateKey = parseDateKey(r[C.date]);
+      if (!code || !dateKey) continue;
+
+      out.push({
+        empType: txt(r[C.empType]), company: txt(r[C.company]), code: code,
+        name: txt(r[C.name]), dateKey: dateKey, shift: txt(r[C.shift]), status: txt(r[C.status]),
+        schedIn: parseHm(r[C.schedIn]), schedOut: parseHm(r[C.schedOut]),
+        timeIn: parseHm(r[C.timeIn]), timeOut: parseHm(r[C.timeOut]),
+        totalMin: parseTasDur(r[C.total]), requiredMin: parseTasDur(r[C.required]),
+        lateMin: parseTasDur(r[C.late]), earlyMin: parseTasDur(r[C.early]),
+        regularMin: parseTasDur(r[C.regular]), otMin: parseTasDur(r[C.ot]),
+        shortageMin: parseTasDur(r[C.shortage]), holidayOtMin: parseTasDur(r[C.holidayOt])
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Speca sometimes exports times in 12-hour format with no AM/PM marker. When
+   * no timestamp in the file reaches hour 13, every event carries two meridiem
+   * candidates and the merge resolves them per day against the schedule.
+   */
+  function parseGate(matrix) {
+    var header = findHeaderRow(matrix, "date/time");
+    if (header < 0) return [];
+
+    var cols = headerCols(matrix[header]);
+    var cId = cols["id"];
+    var cUser = cols["user"] === undefined ? 0 : cols["user"];
+    var cStamp = cols["date/time"] === undefined ? 1 : cols["date/time"];
+    var cEvent = cols["event"] === undefined ? 3 : cols["event"];
+
+    var raw = [];
+    for (var i = header + 1; i < matrix.length; i++) {
+      var r = matrix[i] || [];
+      var event = txt(r[cEvent]).toLowerCase();
+      var dir = event === "access in" ? "in" : event === "access out" ? "out" : null;
+      var stamp = parseGateStamp(r[cStamp]);
+      var user = txt(r[cUser]);
+      if (!dir || !stamp || !user) continue;
+
+      var empNos = [];
+      if (cId !== undefined) {
+        var digits = txt(r[cId]).match(/\d+/g) || [];
+        empNos = digits.map(stripZeros);
+      }
+
+      raw.push({
+        user: user, dateKey: stamp.dateKey, minutes: stamp.minutes,
+        dir: dir, cands: [stamp.minutes], empNos: empNos
+      });
+    }
+
+    var is12h = raw.length > 0 && raw.every(function (e) { return Math.floor(e.minutes / 60) <= 12; });
+    if (is12h) {
+      raw.forEach(function (e) {
+        var hh = Math.floor(e.minutes / 60), mm = e.minutes % 60;
+        e.cands = hh === 12 ? [720 + mm, mm] : [hh * 60 + mm, (hh + 12) * 60 + mm];
+      });
+    }
+    return raw;
+  }
+
+  function parseLeaves(matrix) {
+    var header = findHeaderRow(matrix, "absence type");
+    if (header < 0) return [];
+
+    var cols = headerCols(matrix[header]);
+    function col(label) { return cols[label] === undefined ? -1 : cols[label]; }
+
+    var C = {
+      no: col("employee number"), name: col("employee name"), type: col("absence type"),
+      from: col("start date"), to: col("end date"), approval: col("approval status")
+    };
+
+    var out = [];
+    for (var i = header + 1; i < matrix.length; i++) {
+      var r = matrix[i] || [];
+      if (txt(r[C.approval]).toUpperCase() !== "APPROVED") continue;
+
+      var empNo = stripZeros(r[C.no]);
+      var fromKey = parseDateKey(r[C.from]);
+      var toKey = parseDateKey(r[C.to]) || fromKey;
+      if (!empNo || !fromKey || !toKey) continue;
+
+      out.push({ empNo: empNo, name: txt(r[C.name]), type: txt(r[C.type]), fromKey: fromKey, toKey: toKey });
+    }
+    return out;
+  }
+
+  function parseActive(matrix) {
+    var header = findHeaderRow(matrix, "old emp no");
+    if (header < 0) return [];
+
+    var cols = headerCols(matrix[header]);
+    var labels = Object.keys(cols);
+    var cOld = cols["old emp no."] !== undefined ? cols["old emp no."]
+      : cols["old emp no"] !== undefined ? cols["old emp no"] : 0;
+
+    var newLabel = labels.filter(function (l) { return l.indexOf("emp no") === 0; })[0];
+    var cNew = newLabel === undefined ? 1 : cols[newLabel];
+
+    var nameLabel = labels.filter(function (l) { return l.indexOf("name") >= 0; })[0];
+    var cName = nameLabel === undefined ? 2 : cols[nameLabel];
+
+    var out = [];
+    for (var i = header + 1; i < matrix.length; i++) {
+      var r = matrix[i] || [];
+      var newNo = stripZeros(r[cNew]);
+      if (!newNo) continue;
+      out.push({ oldNo: stripZeros(r[cOld]), newNo: newNo, name: txt(r[cName]) });
+    }
+    return out;
+  }
+
+  /* ---- gate name matching ---- */
+
+  var NAME_STOPWORDS = { ifi: 1, factory: 1, f: 1, mr: 1, mrs: 1 };
+
+  /** Lowercase, drop parenthetical junk, fuse 'Al X' / 'Al-X' into 'alx'. */
+  function nameTokens(name) {
+    var cleaned = String(name || "").toLowerCase()
+      .replace(/\([^)]*\)/g, " ")
+      .replace(/[^a-z؀-ۿ]+/g, " ");
+    var raw = cleaned.split(/\s+/).filter(Boolean);
+    var out = [];
+
+    for (var i = 0; i < raw.length; i++) {
+      if (raw[i] === "al" && i + 1 < raw.length) { out.push("al" + raw[++i]); continue; }
+      if (!NAME_STOPWORDS[raw[i]] && raw[i].length >= 2) out.push(raw[i]);
+    }
+    return out;
+  }
+
+  /**
+   * Token-subset match: every token of the gate name must appear in the
+   * employee's token pool (exact first, then a prefix fallback for tokens of
+   * four characters or more). Several hits at the strictest level that produced
+   * any hit is reported as ambiguous rather than guessed.
+   */
+  function matchGateUser(user, employees) {
+    var wanted = nameTokens(user);
+    if (wanted.length === 0) return {};
+
+    var pools = employees.map(function (employee) {
+      var tokens = {};
+      employee.names.forEach(function (name) {
+        nameTokens(name).forEach(function (token) { tokens[token] = true; });
+      });
+      return { employee: employee, tokens: tokens, list: Object.keys(tokens) };
+    });
+
+    function hitsAt(loose) {
+      return pools.filter(function (pool) {
+        return wanted.every(function (token) {
+          if (pool.tokens[token]) return true;
+          if (!loose || token.length < 4) return false;
+          return pool.list.some(function (own) {
+            return own.indexOf(token) === 0 || token.indexOf(own) === 0;
+          });
+        });
+      });
+    }
+
+    var exact = hitsAt(false);
+    if (exact.length === 1) return { emp: exact[0].employee };
+    if (exact.length > 1) return { ambiguous: exact.map(function (h) { return h.employee; }) };
+
+    var loose = hitsAt(true);
+    if (loose.length === 1) return { emp: loose[0].employee };
+    if (loose.length > 1) return { ambiguous: loose.map(function (h) { return h.employee; }) };
+    return {};
+  }
+
+  /* ---- the merge ---- */
+
+  function eachDay(fromKey, toKey) {
+    var out = [];
+    var day = new Date(fromKey + "T00:00:00Z");
+    var end = new Date(toKey + "T00:00:00Z");
+    while (day <= end && out.length < 400) {
+      out.push(day.toISOString().slice(0, 10));
+      day.setUTCDate(day.getUTCDate() + 1);
+    }
+    return out;
+  }
+
+  var ABSENTISH = { absent: 1, "missing in": 1, "missing out": 1, "": 1 };
+
+  /**
+   * Picks one candidate per ambiguous (12-hour) gate event by minimising a
+   * plausibility score for the whole day: punches anchored to the schedule — or
+   * the TAS punches, or a default office day — and a working span that stays
+   * within sane bounds. A 24-hour export has single candidates and passes
+   * straight through.
+   */
+  function resolveGateDay(row, dayGate) {
+    var events = dayGate.ins.map(function (c) { return { cands: c, dir: "in" }; })
+      .concat(dayGate.outs.map(function (c) { return { cands: c, dir: "out" }; }));
+
+    var single = events.every(function (e) { return e.cands.length === 1; });
+    if (single) {
+      return {
+        ins: dayGate.ins.map(function (c) { return c[0]; }),
+        outs: dayGate.outs.map(function (c) { return c[0]; })
+      };
+    }
+
+    var n = Math.min(events.length, 12);
+    var anchorIn = row.schedIn !== null ? row.schedIn : (row.timeIn !== null ? row.timeIn : 510);
+    var anchorOut = row.schedOut !== null ? row.schedOut : (row.timeOut !== null ? row.timeOut : null);
+    if (anchorOut !== null && row.schedIn !== null && row.schedOut !== null && row.schedOut < row.schedIn) {
+      anchorOut += 1440;
+    }
+    if (anchorOut === null) anchorOut = anchorIn + 540;
+
+    var best = {
+      ins: dayGate.ins.map(function (c) { return c[0]; }),
+      outs: dayGate.outs.map(function (c) { return c[0]; })
+    };
+    var bestScore = Infinity;
+
+    for (var mask = 0; mask < (1 << n); mask++) {
+      var gateIns = [], gateOuts = [];
+      for (var i = 0; i < n; i++) {
+        var event = events[i];
+        var value = event.cands[Math.min((mask >> i) & 1, event.cands.length - 1)];
+        (event.dir === "in" ? gateIns : gateOuts).push(value);
+      }
+
+      var ins = gateIns.concat(row.timeIn !== null ? [row.timeIn] : []);
+      var outs = gateOuts.concat(row.timeOut !== null ? [row.timeOut] : []);
+      var effIn = ins.length ? Math.min.apply(null, ins) : null;
+      var effOutRaw = outs.length ? Math.max.apply(null, outs) : null;
+
+      var penalty = 0;
+      var effOut = effOutRaw;
+      if (effIn !== null && effOutRaw !== null) {
+        effOut = effOutRaw >= effIn ? effOutRaw : effOutRaw + 1440;
+        var duration = effOut - effIn;
+        if (duration > 16 * 60) penalty += 100000;
+        if (duration < 30) penalty += 50000;
+        penalty += Math.abs(duration - 540) / 4;
+      }
+      if (effIn !== null) penalty += Math.abs(effIn - anchorIn);
+      if (effOut !== null) penalty += Math.abs(effOut - anchorOut);
+
+      if (penalty < bestScore) { bestScore = penalty; best = { ins: gateIns, outs: gateOuts }; }
+    }
+    return best;
+  }
+
+  function buildMergedReport(tas, gate, leaves, active) {
+    // employee registry keyed by the canonical TAS code
+    var old2new = {}, newSet = {}, nameByNew = {};
+    active.forEach(function (a) {
+      old2new[a.oldNo] = a.newNo;
+      newSet[a.newNo] = true;
+      nameByNew[a.newNo] = a.name;
+    });
+
+    var byCode = {};
+    tas.forEach(function (r) {
+      if (byCode[r.code]) return;
+      var newNo = newSet[r.code] ? r.code : (old2new[r.code] !== undefined ? old2new[r.code] : null);
+      var names = [r.name];
+      if (newNo && nameByNew[newNo]) names.push(nameByNew[newNo]);
+      byCode[r.code] = { code: r.code, newNo: newNo, names: names };
+    });
+
+    var employees = Object.keys(byCode).map(function (code) { return byCode[code]; });
+    var byNew = {};
+    employees.forEach(function (e) { if (e.newNo) byNew[e.newNo] = e; });
+
+    // the report period comes from the TAS export itself
+    var dateKeys = tas.map(function (r) { return r.dateKey; }).sort();
+    var periodMin = dateKeys.length ? dateKeys[0] : "0000-00-00";
+    var periodMax = dateKeys.length ? dateKeys[dateKeys.length - 1] : "9999-99-99";
+
+    var companies = {};
+    tas.forEach(function (r) { companies[r.company] = (companies[r.company] || 0) + 1; });
+    var commonCompany = Object.keys(companies).sort(function (a, b) { return companies[b] - companies[a]; })[0] || "";
+
+    // employees the Active list knows but TAS does not: their gate/leave
+    // evidence still deserves rows, synthesised as 'Not in TAS' below
+    var activeByAnyNo = {};
+    active.forEach(function (a) {
+      activeByAnyNo[a.newNo] = a;
+      if (a.oldNo) activeByAnyNo[a.oldNo] = a;
+    });
+
+    var extraByCode = {};
+    function extraEmp(a) {
+      if (!extraByCode[a.newNo]) extraByCode[a.newNo] = { code: a.newNo, newNo: a.newNo, names: [a.name] };
+      return extraByCode[a.newNo];
+    }
+    var activeOnlyRefs = active
+      .filter(function (a) { return !byNew[a.newNo] && !byCode[a.newNo] && !byCode[a.oldNo]; })
+      .map(function (a) { return { code: a.newNo, newNo: a.newNo, names: [a.name] }; });
+
+    // gate: resolve each distinct badge (ID + displayed name) once, then group
+    // events per employee and day. The employee number, when the export carries
+    // one, is authoritative; name matching covers the older exports.
+    var users = {};
+    gate.forEach(function (ev) {
+      var key = ev.empNos.join(",") + "|" + ev.user;
+      if (!users[key]) users[key] = { user: ev.user, empNos: ev.empNos, events: [] };
+      users[key].events.push(ev);
+    });
+
+    function resolveByNumber(numbers) {
+      for (var i = 0; i < numbers.length; i++) {
+        var no = numbers[i];
+        var bridged = old2new[no];
+        var hit = byCode[no] || byNew[no] ||
+          (bridged !== undefined ? (byCode[bridged] || byNew[bridged]) : undefined);
+        if (hit) return hit;
+        if (activeByAnyNo[no]) return extraEmp(activeByAnyNo[no]);
+      }
+      return undefined;
+    }
+
+    var unmatchedGateUsers = [];
+    var gateByEmpDay = {};
+    var gateMatchedEvents = 0, gateUsersMatched = 0, gateUsersMatchedByNumber = 0;
+
+    Object.keys(users).forEach(function (key) {
+      var group = users[key];
+      var byNumber = resolveByNumber(group.empNos);
+      var match = byNumber ? { emp: byNumber } : matchGateUser(group.user, employees.concat(activeOnlyRefs));
+      if (byNumber) gateUsersMatchedByNumber++;
+
+      if (!match.emp) {
+        var numberNote = group.empNos.length
+          ? "emp no " + group.empNos.join("/") + " not found in TAS or Active list; " : "";
+        unmatchedGateUsers.push({
+          user: group.user, events: group.events.length,
+          reason: numberNote + (match.ambiguous
+            ? "ambiguous name: " + match.ambiguous.map(function (a) { return a.names[0] + " (" + a.code + ")"; }).join(" / ")
+            : "no employee matched")
+        });
+        return;
+      }
+
+      var emp = match.emp;
+      if (!byCode[emp.code] && !extraByCode[emp.code]) extraByCode[emp.code] = emp;
+      gateUsersMatched++;
+
+      group.events.forEach(function (ev) {
+        gateMatchedEvents++;
+        var k = emp.code + "|" + ev.dateKey;
+        if (!gateByEmpDay[k]) gateByEmpDay[k] = { ins: [], outs: [] };
+        (ev.dir === "in" ? gateByEmpDay[k].ins : gateByEmpDay[k].outs).push(ev.cands);
+      });
+    });
+
+    // leaves: expand approved ranges to per-day entries keyed by canonical code,
+    // clipped to the report period; whatever cannot be applied gets a reason
+    var leaveByEmpDay = {};
+    var unresolvedLeaves = [];
+    var leaveRowsApplied = 0, leavesOutsidePeriod = 0;
+
+    leaves.forEach(function (lv) {
+      var emp = byNew[lv.empNo] || byCode[lv.empNo];
+      if (!emp && activeByAnyNo[lv.empNo]) emp = extraEmp(activeByAnyNo[lv.empNo]);
+
+      if (!emp) {
+        unresolvedLeaves.push({
+          empNo: lv.empNo, name: lv.name, type: lv.type, from: lv.fromKey, to: lv.toKey,
+          reason: "employee number not found in TAS or the Active list"
+        });
+        return;
+      }
+
+      var days = eachDay(lv.fromKey, lv.toKey).filter(function (d) { return d >= periodMin && d <= periodMax; });
+      if (days.length === 0) {
+        leavesOutsidePeriod++;
+        unresolvedLeaves.push({
+          empNo: lv.empNo, name: lv.name, type: lv.type, from: lv.fromKey, to: lv.toKey,
+          reason: "dates are outside the report period (" + periodMin + " -> " + periodMax + ")"
+        });
+        return;
+      }
+
+      leaveRowsApplied++;
+      days.forEach(function (day) { leaveByEmpDay[emp.code + "|" + day] = lv.type; });
+    });
+
+    // per-row merge, shared by real TAS rows and synthesised 'Not in TAS' rows
+    var rows = [];
+    var statusUpgraded = 0, punchesImproved = 0, leaveDaysApplied = 0;
+
+    function mergeOne(r, emp) {
+      var k = emp.code + "|" + r.dateKey;
+      var dayGate = gateByEmpDay[k];
+      var resolved = dayGate ? resolveGateDay(r, dayGate) : { ins: [], outs: [] };
+
+      // earliest IN across TAS + gate; latest OUT across TAS + gate
+      var ins = [r.timeIn].concat(resolved.ins).filter(function (x) { return x !== null; });
+      var outs = [r.timeOut].concat(resolved.outs).filter(function (x) { return x !== null; });
+      var effIn = ins.length ? Math.min.apply(null, ins) : null;
+      var effOut = outs.length ? Math.max.apply(null, outs) : null;
+
+      var inSource = effIn === null ? "" : effIn === r.timeIn ? "TAS" : "Car Gate";
+      var outSource = effOut === null ? "" : effOut === r.timeOut ? "TAS" : "Car Gate";
+      var changed = effIn !== r.timeIn || effOut !== r.timeOut;
+      if (changed) punchesImproved++;
+
+      var m = {};
+      Object.keys(r).forEach(function (key) { m[key] = r[key]; });
+      m.newNo = emp.newNo;
+      m.leaveType = "";
+      m.inSource = inSource;
+      m.outSource = outSource;
+      m.timeIn = effIn;
+      m.timeOut = effOut;
+
+      if (changed && effIn !== null && effOut !== null) {
+        var total = effOut >= effIn ? effOut - effIn : effOut + 1440 - effIn; // overnight-safe
+        m.totalMin = total;
+        m.lateMin = m.schedIn !== null && effIn > m.schedIn ? effIn - m.schedIn : null;
+
+        var schedOutAbs = m.schedOut !== null && m.schedIn !== null && m.schedOut < m.schedIn
+          ? m.schedOut + 1440 : m.schedOut;
+        var effOutAbs = effOut >= effIn ? effOut : effOut + 1440;
+        m.earlyMin = schedOutAbs !== null && effOutAbs < schedOutAbs ? schedOutAbs - effOutAbs : null;
+        m.shortageMin = m.requiredMin !== null && total < m.requiredMin ? m.requiredMin - total : null;
+        m.regularMin = m.requiredMin !== null ? Math.min(total, m.requiredMin) : total;
+      }
+
+      // status upgrade from gate punches
+      var status = m.status.toLowerCase();
+      if (ABSENTISH[status]) {
+        if (effIn !== null && effOut !== null) { m.status = "Present"; statusUpgraded++; }
+        else if (effIn !== null && status !== "missing out") { m.status = "Missing Out"; statusUpgraded++; }
+        else if (effOut !== null && effIn === null && status !== "missing in") { m.status = "Missing In"; statusUpgraded++; }
+      }
+
+      // approved leave: never show an absence on a covered day
+      var leaveType = leaveByEmpDay[k];
+      if (leaveType) {
+        m.leaveType = leaveType;
+        leaveDaysApplied++;
+        if (ABSENTISH[m.status.toLowerCase()]) {
+          m.status = leaveType;
+          m.lateMin = null; m.earlyMin = null; m.shortageMin = null;
+        }
+      }
+      return m;
+    }
+
+    tas.forEach(function (r) { rows.push(mergeOne(r, byCode[r.code])); });
+
+    // Active-list employees missing from TAS: synthesise rows for the days where
+    // gate punches or approved leave prove something happened in the period
+    var employeesAddedNotInTas = 0;
+    Object.keys(extraByCode).forEach(function (code) {
+      var emp = extraByCode[code];
+      var dayKeys = {};
+      var prefix = emp.code + "|";
+
+      Object.keys(gateByEmpDay).forEach(function (key) {
+        if (key.indexOf(prefix) === 0) dayKeys[key.slice(prefix.length)] = true;
+      });
+      Object.keys(leaveByEmpDay).forEach(function (key) {
+        if (key.indexOf(prefix) === 0) dayKeys[key.slice(prefix.length)] = true;
+      });
+
+      var inPeriod = Object.keys(dayKeys)
+        .filter(function (d) { return d >= periodMin && d <= periodMax; }).sort();
+      if (inPeriod.length === 0) return;
+
+      employeesAddedNotInTas++;
+      inPeriod.forEach(function (dateKey) {
+        rows.push(mergeOne({
+          empType: "Not in TAS", company: commonCompany, code: emp.code, name: emp.names[0],
+          dateKey: dateKey, shift: "", status: "", schedIn: null, schedOut: null,
+          timeIn: null, timeOut: null, totalMin: null, requiredMin: null,
+          lateMin: null, earlyMin: null, regularMin: null, otMin: null,
+          shortageMin: null, holidayOtMin: null
+        }, emp));
+      });
+    });
+
+    var tasDays = {};
+    tas.forEach(function (r) { tasDays[r.dateKey] = true; });
+
+    return {
+      rows: rows,
+      summary: {
+        employees: employees.length,
+        days: Object.keys(tasDays).length,
+        gateEvents: gate.length,
+        gateMatchedEvents: gateMatchedEvents,
+        gateUsersMatched: gateUsersMatched,
+        gateUsersMatchedByNumber: gateUsersMatchedByNumber,
+        gateUsersUnmatched: unmatchedGateUsers.length,
+        leaveRowsApplied: leaveRowsApplied,
+        leaveDaysApplied: leaveDaysApplied,
+        statusUpgraded: statusUpgraded,
+        punchesImproved: punchesImproved,
+        employeesAddedNotInTas: employeesAddedNotInTas,
+        leavesOutsidePeriod: leavesOutsidePeriod
+      },
+      unmatchedGateUsers: unmatchedGateUsers.sort(function (a, b) { return b.events - a.events; }),
+      unresolvedLeaves: unresolvedLeaves
+    };
+  }
+
+  /** Output columns: the TAS column design plus the merge extras. */
+  var MERGED_HEADERS = [
+    "Employee Type", "Company", "Employee Code", "Emp No. (New)", "Employee Name", "Date",
+    "Shift Code", "Status", "Scheduled IN", "Scheduled OUT", "Time In", "Time Out",
+    "Total Hours", "Required Hours", "Late Coming", "Early Departure", "Regular Hours",
+    "Normal OT Hrs", "Shortage Hours", "Holiday OT Hrs", "Leave Type", "IN Source", "OUT Source"
+  ];
+
+  function mergedRowCells(m) {
+    return [
+      m.empType, m.company, m.code, m.newNo || "", m.name, m.dateKey,
+      m.shift, m.status, fmtHm(m.schedIn), fmtHm(m.schedOut), fmtHm(m.timeIn), fmtHm(m.timeOut),
+      fmtDur(m.totalMin), fmtDur(m.requiredMin), fmtDur(m.lateMin), fmtDur(m.earlyMin),
+      fmtDur(m.regularMin), fmtDur(m.otMin), fmtDur(m.shortageMin), fmtDur(m.holidayOtMin),
+      m.leaveType, m.inSource, m.outSource
+    ];
+  }
+
+  var MERGE_SLOTS = [
+    { kind: "tas",    label: "TAS",         source: "HR Works — main attendance",              required: true },
+    { kind: "gate",   label: "Car Gate",    source: "Speca Time & Space — access events",      required: false },
+    { kind: "leaves", label: "Leaves",      source: "Oracle Fusion — approved absences",       required: false },
+    { kind: "active", label: "Active list", source: "Oracle Fusion — old / new emp numbers",   required: true }
+  ];
+
+  /* ================================================================== *
+   * placeholder report used by the two remaining tabs
+   * ================================================================== */
 
   function findNumericColumns(headers, rows) {
     var numeric = [];
@@ -1149,6 +1873,485 @@
     data.views = [{ state: "frozen", ySplit: 1 }];
 
     return workbook;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * report-merge panel (FTE Detailed Report)
+   * ------------------------------------------------------------------ */
+
+  // The merge parsers find their own header rows, so the sheet is handed over
+  // exactly as exported — no cleaning, no unmerging.
+  function readRawMatrix(file) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onerror = function () { reject(new Error("could not read this file")); };
+      reader.onload = function (event) {
+        try {
+          var workbook = XLSX.read(new Uint8Array(event.target.result), { type: "array" });
+          var sheetName = workbook.SheetNames[0];
+          if (!sheetName) throw new Error("this workbook has no sheets");
+          resolve(XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], {
+            header: 1, defval: null, blankrows: true, raw: true
+          }));
+        } catch (error) {
+          reject(error);
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    });
+  }
+
+  function buildMergeWorkbook(result) {
+    var workbook = new ExcelJS.Workbook();
+    workbook.creator = "Reports Generator — Report Merge";
+    workbook.created = new Date();
+
+    var sheet = workbook.addWorksheet("Attendance", {
+      views: [{ state: "frozen", ySplit: 1, xSplit: 5 }],
+      properties: { defaultRowHeight: 18 }
+    });
+
+    sheet.columns = MERGED_HEADERS.map(function (header) {
+      return {
+        header: header,
+        width: Math.max(11, Math.min(30, header.length + 4)),
+        style: bodyStyle(SOURCE, null)
+      };
+    });
+
+    var GATE_FILL = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFF3D6" } };
+    var LEAVE_FILL = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE8F0DA" } };
+
+    result.rows.forEach(function (row) {
+      var added = sheet.addRow(mergedRowCells(row).map(function (value) {
+        return value === "" ? null : value;
+      }));
+      if (row.leaveType && row.status === row.leaveType) added.getCell(8).fill = LEAVE_FILL;
+      if (row.inSource === "Car Gate") added.getCell(11).fill = GATE_FILL;
+      if (row.outSource === "Car Gate") added.getCell(12).fill = GATE_FILL;
+    });
+
+    sheet.getRow(1).height = 30;
+    sheet.getRow(1).eachCell(function (cell) { cell.style = headerStyle(SOURCE); });
+    sheet.autoFilter = {
+      from: { row: 1, column: 1 },
+      to: { row: result.rows.length + 1, column: MERGED_HEADERS.length }
+    };
+
+    /* ---- summary & exceptions ---- */
+    var ex = workbook.addWorksheet("Summary & Exceptions", { properties: { defaultRowHeight: 18 } });
+    [36, 30, 46, 14, 14, 50].forEach(function (width, index) {
+      ex.getColumn(index + 1).width = width;
+      ex.getColumn(index + 1).style = { font: { name: "Aptos", size: 11 } };
+    });
+
+    function heading(cells) {
+      var row = ex.addRow(cells);
+      row.height = 22;
+      for (var c = 1; c <= Math.max(cells.length, 1); c++) row.getCell(c).style = headerStyle(SOURCE);
+      return row;
+    }
+
+    heading(["Merged attendance — summary"]);
+    var SUMMARY_LABELS = {
+      employees: "Employees in TAS", days: "Days covered",
+      gateEvents: "Car-gate events read", gateMatchedEvents: "Car-gate events matched",
+      gateUsersMatched: "Gate badges matched", gateUsersMatchedByNumber: "Gate badges matched by number",
+      gateUsersUnmatched: "Gate badges unmatched",
+      leaveRowsApplied: "Approved leave rows applied", leaveDaysApplied: "Leave days applied",
+      statusUpgraded: "Absences resolved by gate", punchesImproved: "Punches improved by gate",
+      employeesAddedNotInTas: "Employees added (not in TAS)", leavesOutsidePeriod: "Leaves outside the period"
+    };
+    Object.keys(result.summary).forEach(function (key) {
+      var row = ex.addRow([SUMMARY_LABELS[key] || key, result.summary[key]]);
+      row.getCell(1).font = { name: "Aptos", size: 11, bold: true };
+    });
+
+    ex.addRow([]);
+    heading(["Unmatched car-gate names", "Events", "Reason"]);
+    if (!result.unmatchedGateUsers.length) ex.addRow(["— none —"]);
+    result.unmatchedGateUsers.forEach(function (u) { ex.addRow([u.user, u.events, u.reason]); });
+
+    ex.addRow([]);
+    heading(["Approved leaves not applied", "Name", "Type", "From", "To", "Reason"]);
+    if (!result.unresolvedLeaves.length) ex.addRow(["— none —"]);
+    result.unresolvedLeaves.forEach(function (l) {
+      ex.addRow([l.empNo, l.name, l.type, l.from, l.to, l.reason]);
+    });
+
+    ex.addRow([]);
+    heading(["Legend"]);
+    ex.addRow(["Amber time cell", "the punch came from the Car Gate, not TAS"]);
+    ex.addRow(["Green status cell", "an approved leave replaced an absence"]);
+    ex.addRow(["Employee Type 'Not in TAS'", "row built from gate or leave evidence alone"]);
+
+    return workbook;
+  }
+
+  function createMergePanel(tab) {
+    var state = { slots: {}, result: null };
+
+    var panel = el("section", "panel");
+    panel.id = "panel-" + tab.id;
+    panel.setAttribute("role", "tabpanel");
+    panel.setAttribute("aria-labelledby", "tab-" + tab.id);
+
+    /* ---- upload ---- */
+    var uploadCard = el("div", "card");
+    uploadCard.appendChild(el("h2", null, "Report Merge"));
+    uploadCard.appendChild(el("p", "sub",
+      "Upload the four period exports — TAS (HR Works), Car Gate (Speca), Leaves and Active list " +
+      "(Oracle Fusion). Each file is recognised automatically."));
+
+    var drop = el("div", "drop");
+    drop.tabIndex = 0;
+    drop.setAttribute("role", "button");
+    drop.setAttribute("aria-label", "Upload the report files to merge");
+    drop.innerHTML =
+      '<div class="icon" aria-hidden="true">&#128194;</div>' +
+      '<span class="big">Drop the Excel files here, or click to choose</span>' +
+      '<span class="small">All four can be dropped at once &mdash; each report is detected automatically</span>';
+
+    var input = el("input");
+    input.type = "file";
+    input.multiple = true;
+    input.accept = ".xlsx,.xls,.xlsm,.xlsb";
+    drop.appendChild(input);
+    uploadCard.appendChild(drop);
+
+    var slotsBox = el("div", "slots");
+    uploadCard.appendChild(slotsBox);
+
+    var alert = el("div", "alert");
+    alert.setAttribute("role", "alert");
+    uploadCard.appendChild(alert);
+
+    var actions = el("div", "actions");
+    var generateBtn = el("button", "btn btn-primary", "Generate merged report");
+    var downloadBtn = el("button", "btn btn-secondary", "Download merged report (.xlsx)");
+    generateBtn.type = "button";
+    downloadBtn.type = "button";
+    generateBtn.disabled = true;
+    downloadBtn.disabled = true;
+    actions.appendChild(generateBtn);
+    actions.appendChild(downloadBtn);
+    uploadCard.appendChild(actions);
+    uploadCard.appendChild(el("div", "hint",
+      "TAS and the Active list are required. Car Gate and Leaves are optional — without them the merge " +
+      "simply has less evidence to work with."));
+    panel.appendChild(uploadCard);
+
+    /* ---- report ---- */
+    var reportCard = el("div", "card");
+    reportCard.appendChild(el("h2", null, "Merge result"));
+    reportCard.appendChild(el("p", "sub", "What the four reports contributed, and what could not be resolved."));
+    var reportBody = el("div");
+    reportBody.appendChild(el("div", "empty", "Upload the files and generate the merged report."));
+    reportCard.appendChild(reportBody);
+    panel.appendChild(reportCard);
+
+    /* ---- preview ---- */
+    var previewCard = el("div", "card");
+    previewCard.appendChild(el("h2", null, "Data preview"));
+    previewCard.appendChild(el("p", "sub", "First " + PREVIEW_ROWS + " rows of the merged attendance sheet."));
+    var previewBody = el("div");
+    previewBody.appendChild(el("div", "empty", "No merged report yet."));
+    previewCard.appendChild(previewBody);
+    panel.appendChild(previewCard);
+
+    /* ---- rendering ---- */
+
+    function showError(message) {
+      alert.className = "alert show";
+      alert.textContent = message;
+    }
+
+    function clearError() {
+      alert.className = "alert";
+      alert.textContent = "";
+    }
+
+    function renderSlots() {
+      slotsBox.innerHTML = "";
+      MERGE_SLOTS.forEach(function (meta) {
+        var loaded = state.slots[meta.kind];
+        var slot = el("div", "slot" + (loaded ? " filled" : ""));
+        slot.appendChild(el("div", "mark", loaded ? "✓" : "…"));
+
+        var body = el("div", "body");
+        body.appendChild(el("div", "title", meta.label));
+        body.appendChild(el("div", "detail", loaded ? loaded.name : meta.source));
+        if (!loaded && meta.required) body.appendChild(el("div", "req", "required"));
+        slot.appendChild(body);
+        slotsBox.appendChild(slot);
+      });
+
+      generateBtn.disabled = !(state.slots.tas && state.slots.active);
+    }
+
+    function renderPreview() {
+      previewBody.innerHTML = "";
+      if (!state.result) {
+        previewBody.appendChild(el("div", "empty", "No merged report yet."));
+        return;
+      }
+
+      var rows = state.result.rows.map(mergedRowCells);
+      var scroll = el("div", "table-scroll");
+      var table = el("table");
+
+      var thead = el("thead");
+      var headRow = el("tr");
+      MERGED_HEADERS.forEach(function (header) { headRow.appendChild(el("th", null, header)); });
+      thead.appendChild(headRow);
+      table.appendChild(thead);
+
+      var tbody = el("tbody");
+      rows.slice(0, PREVIEW_ROWS).forEach(function (row, index) {
+        var merged = state.result.rows[index];
+        var tr = el("tr");
+        row.forEach(function (value, column) {
+          var className = "";
+          if ((column === 10 && merged.inSource === "Car Gate") ||
+              (column === 11 && merged.outSource === "Car Gate")) className = "c-input";
+          if (column === 7 && merged.leaveType && merged.status === merged.leaveType) className = "c-calc";
+          var td = el("td", className || null, value === null || value === undefined ? "" : String(value));
+          td.title = td.textContent;
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+
+      scroll.appendChild(table);
+      previewBody.appendChild(scroll);
+
+      var legend = el("div", "legend");
+      [["#d97706", "Time taken from the Car Gate"], ["#0d9488", "Approved leave replaced an absence"]]
+        .forEach(function (pair) {
+          var item = el("span");
+          var swatch = el("i");
+          swatch.style.background = pair[0];
+          item.appendChild(swatch);
+          item.appendChild(el("span", null, pair[1]));
+          legend.appendChild(item);
+        });
+      previewBody.appendChild(legend);
+
+      previewBody.appendChild(el("div", "hint",
+        "Showing " + Math.min(PREVIEW_ROWS, rows.length) + " of " + rows.length.toLocaleString() +
+        " rows. The downloaded file holds every row plus a Summary & Exceptions sheet."));
+    }
+
+    function exceptionTable(title, headers, rows, emptyNote) {
+      var box = el("div", "subtable");
+      box.appendChild(el("h3", null, title));
+      if (!rows.length) {
+        box.appendChild(el("div", "hint", emptyNote));
+        return box;
+      }
+
+      var scroll = el("div", "table-scroll");
+      scroll.style.maxHeight = "260px";
+      var table = el("table");
+
+      var thead = el("thead");
+      var headRow = el("tr");
+      headers.forEach(function (header) { headRow.appendChild(el("th", null, header)); });
+      thead.appendChild(headRow);
+      table.appendChild(thead);
+
+      var tbody = el("tbody");
+      rows.forEach(function (row) {
+        var tr = el("tr");
+        row.forEach(function (value) { tr.appendChild(el("td", null, String(value))); });
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+
+      scroll.appendChild(table);
+      box.appendChild(scroll);
+      return box;
+    }
+
+    function renderReport() {
+      reportBody.innerHTML = "";
+      if (!state.result) {
+        reportBody.appendChild(el("div", "empty", "Upload the files and generate the merged report."));
+        return;
+      }
+
+      var summary = state.result.summary;
+      var stats = el("div", "stats");
+      [
+        ["Employees", summary.employees.toLocaleString()],
+        ["Attendance rows", state.result.rows.length.toLocaleString()],
+        ["Punches improved", summary.punchesImproved.toLocaleString()],
+        ["Absences resolved", summary.statusUpgraded.toLocaleString()],
+        ["Leave days applied", summary.leaveDaysApplied.toLocaleString()],
+        ["Unmatched gate names", summary.gateUsersUnmatched.toLocaleString()]
+      ].forEach(function (pair) {
+        var box = el("div", "stat");
+        box.appendChild(el("div", "label", pair[0]));
+        box.appendChild(el("div", "value", pair[1]));
+        stats.appendChild(box);
+      });
+      reportBody.appendChild(stats);
+
+      reportBody.appendChild(el("div", "hint",
+        "Days covered: " + summary.days + " · gate events read: " + summary.gateEvents.toLocaleString() +
+        " (matched " + summary.gateMatchedEvents.toLocaleString() + ") · badges matched by number: " +
+        summary.gateUsersMatchedByNumber + " · employees added that TAS did not have: " +
+        summary.employeesAddedNotInTas));
+
+      reportBody.appendChild(exceptionTable(
+        "Unmatched car-gate names",
+        ["Name", "Events", "Reason"],
+        state.result.unmatchedGateUsers.map(function (u) { return [u.user, u.events, u.reason]; }),
+        "Every gate badge was matched to an employee."));
+
+      if (state.result.unmatchedGateUsers.length) {
+        reportBody.appendChild(el("div", "hint",
+          "Mostly trainees and visitors, or spellings the matcher would not resolve without guessing. " +
+          "Asking Speca to include the employee number in the export gives full coverage."));
+      }
+
+      reportBody.appendChild(exceptionTable(
+        "Approved leaves not applied",
+        ["Emp No.", "Name", "Type", "From", "To", "Reason"],
+        state.result.unresolvedLeaves.map(function (l) { return [l.empNo, l.name, l.type, l.from, l.to, l.reason]; }),
+        "Every approved leave landed on a day in the report."));
+    }
+
+    /* ---- files ---- */
+
+    function handleFiles(files) {
+      if (!files || !files.length) return;
+
+      if (typeof XLSX === "undefined" || typeof ExcelJS === "undefined") {
+        showError("The Excel libraries could not be loaded. Check your internet connection and reload the page.");
+        return;
+      }
+
+      clearError();
+      state.result = null;
+      renderReport();
+      renderPreview();
+      downloadBtn.disabled = true;
+
+      var list = Array.prototype.slice.call(files);
+      var problems = [];
+
+      Promise.all(list.map(function (file) {
+        if (!/\.(xlsx|xls|xlsm|xlsb)$/i.test(file.name)) {
+          problems.push(file.name + ": not an Excel file");
+          return Promise.resolve();
+        }
+        return readRawMatrix(file).then(function (matrix) {
+          var kind = detectReportKind(matrix);
+          if (!kind) {
+            problems.push(file.name + ": not recognised as TAS / Car Gate / Leaves / Active list");
+            return;
+          }
+          state.slots[kind] = { name: file.name, matrix: matrix, size: file.size };
+        }).catch(function (error) {
+          problems.push(file.name + ": " + (error.message || "could not be read"));
+        });
+      })).then(function () {
+        renderSlots();
+        if (problems.length) showError(problems.join(" · "));
+      });
+    }
+
+    drop.addEventListener("click", function () { input.click(); });
+    drop.addEventListener("keydown", function (event) {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        input.click();
+      }
+    });
+    input.addEventListener("change", function () {
+      handleFiles(input.files);
+      input.value = "";
+    });
+
+    ["dragenter", "dragover"].forEach(function (name) {
+      drop.addEventListener(name, function (event) {
+        event.preventDefault();
+        drop.classList.add("is-over");
+      });
+    });
+    ["dragleave", "dragend", "drop"].forEach(function (name) {
+      drop.addEventListener(name, function () { drop.classList.remove("is-over"); });
+    });
+    drop.addEventListener("drop", function (event) {
+      event.preventDefault();
+      if (event.dataTransfer) handleFiles(event.dataTransfer.files);
+    });
+
+    /* ---- actions ---- */
+
+    function withBusy(button, label, work) {
+      var original = button.textContent;
+      button.textContent = label;
+      button.disabled = true;
+
+      setTimeout(function () {
+        var finish = function () {
+          button.textContent = original;
+          button.disabled = false;
+        };
+        try {
+          var result = work();
+          if (result && typeof result.then === "function") {
+            result.then(finish, function (error) {
+              finish();
+              showError("Could not build the workbook: " + (error.message || error));
+            });
+          } else finish();
+        } catch (error) {
+          finish();
+          showError("Something went wrong: " + (error.message || error));
+        }
+      }, 30);
+    }
+
+    generateBtn.addEventListener("click", function () {
+      if (!state.slots.tas || !state.slots.active) return;
+      clearError();
+
+      withBusy(generateBtn, "Merging…", function () {
+        state.result = buildMergedReport(
+          parseTas(state.slots.tas.matrix),
+          state.slots.gate ? parseGate(state.slots.gate.matrix) : [],
+          state.slots.leaves ? parseLeaves(state.slots.leaves.matrix) : [],
+          parseActive(state.slots.active.matrix)
+        );
+        renderReport();
+        renderPreview();
+        downloadBtn.disabled = state.result.rows.length === 0;
+        if (!state.result.rows.length) {
+          showError("The merge produced no rows — check that the TAS file is the detailed attendance export.");
+        }
+      });
+    });
+
+    downloadBtn.addEventListener("click", function () {
+      if (!state.result) return;
+      clearError();
+
+      withBusy(downloadBtn, "Building file…", function () {
+        return buildMergeWorkbook(state.result).xlsx.writeBuffer().then(function (buffer) {
+          downloadBlob(
+            new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }),
+            "merged-attendance.xlsx"
+          );
+        });
+      });
+    });
+
+    renderSlots();
+    return panel;
   }
 
   /* ------------------------------------------------------------------ *
@@ -1789,7 +2992,7 @@
 
     tablist.appendChild(button);
     buttons.push(button);
-    panels.appendChild(createPanel(tab));
+    panels.appendChild(tab.mode === "merge" ? createMergePanel(tab) : createPanel(tab));
   });
 
   select(0);

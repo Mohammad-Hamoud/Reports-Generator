@@ -11,8 +11,8 @@ Libraries loaded from CDN:
 
 ## Tabs
 
-1. **Casuals Detailed Report** — fully implemented (see below)
-2. **FTE Detailed Report** — generic placeholder summary
+1. **Casuals Detailed Report** — timesheet cleanup + payroll columns (see below)
+2. **FTE Detailed Report** — Report Merge: four system exports into one attendance file
 3. **Casual Period Summary** — generic placeholder summary
 4. **FTE Period Summary** — generic placeholder summary
 
@@ -103,9 +103,42 @@ Two sheets, styled in **Aptos** with no merged cells:
 - `Summary` — report metadata, attendance totals, the cleanup that was applied, and
   payroll totals that sum the detail sheet.
 
+## FTE Detailed Report — Report Merge
+
+Ported from the `AIC-Attendance` project (`src/domain/merge.ts` + `src/pages/Merge.tsx`).
+Drop all four period exports at once; each one is recognised from its own header shape:
+
+| Report | System | Role in the merge |
+| --- | --- | --- |
+| **TAS** *(required)* | HR Works | Main attendance, one row per employee per day. `Employee Code` is usually the OLD number. |
+| **Car Gate** | Speca Time & Space | Access events. Older exports carry names only and are matched by name tokens; newer ones carry the employee number, which wins. |
+| **Leaves** | Oracle Fusion | Approved absences, keyed by the NEW employee number. |
+| **Active list** *(required)* | Oracle Fusion | The Old No. ↔ New No. ↔ Name bridge that ties the other three together. |
+
+What the merge does:
+
+- **Best punches win** — earliest IN and latest OUT across TAS and the gate. Total, late,
+  early, shortage and regular hours are recomputed whenever a punch changes, overnight
+  shifts included.
+- **Absences get resolved** — a day TAS calls `Absent` becomes `Present`, `Missing In` or
+  `Missing Out` when gate punches prove attendance.
+- **Approved leave replaces absence** — every approved leave type, expanded day by day and
+  clipped to the report period.
+- **12-hour gate exports** — Speca sometimes prints times with no AM/PM. When no timestamp
+  in the file reaches hour 13, each event gets two candidates and the day is resolved
+  against the schedule by picking the most plausible combination.
+- **Employees missing from TAS** — anyone in the Active list with gate or leave evidence
+  inside the period gets rows marked `Not in TAS` instead of vanishing.
+- **Nothing is dropped silently** — unmatched gate badges and un-appliable leaves are
+  listed on screen and in the workbook with the reason.
+
+The exported workbook has an `Attendance` sheet (the 23 TAS-design columns plus
+`Emp No. (New)`, `Leave Type`, `IN Source`, `OUT Source`; amber = punch from the gate,
+green = leave applied) and a `Summary & Exceptions` sheet.
+
 ## Other tabs
 
-The remaining three tabs run the same generic placeholder analysis until their own rules
+The remaining two tabs run the same generic placeholder analysis until their own rules
 are defined: row/column/numeric-field counts, plus `count`, `sum`, `average`, `min` and
 `max` per numeric column.
 
