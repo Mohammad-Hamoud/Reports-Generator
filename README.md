@@ -38,28 +38,43 @@ read and cleaned automatically.
 
 ### Column mapping
 
-The date column, the actual-hours column and the required hours per day (default **12**)
-are detected automatically and shown as editable controls before the report is generated.
+The date column, the actual-hours column, the status column (which drives overtime) and
+the required hours per day (default **12**) are detected automatically and shown as
+editable controls before the report is generated.
 
 ### Added columns
 
 | Column | Type | Meaning |
 | --- | --- | --- |
+| Cost Center | **you fill in** | Left empty for manual entry |
 | Required Hours / Day | calculated | The daily target, `12` by default |
-| Hours Completion % | formula | `actual hours ÷ required hours` |
+| Hours Completion % | formula | `actual hours ÷ required hours`, uncapped so you can see overtime days |
 | Monthly Salary | **you fill in** | Left empty on purpose |
 | Days in Month | formula | `DAY(EOMONTH(date,0))` → 28/29/30/31 |
 | Daily Salary | formula | `Monthly Salary ÷ Days in Month` |
-| Payment for Day | formula | `Daily Salary × Hours Completion %` |
+| Payment for Day | formula | `Daily Salary × MIN(Completion %, 100%)` — never more than one full day |
+| Excess Above Cap | formula | `Daily Salary × MAX(Completion % − 100%, 0)` — what the cap trimmed off |
+| OT Hours | formula | On a worked day off: `1.5 × MIN(Total Hours, Required Hours)` |
+| Manual OT Hours | **you fill in** | Overrides OT Hours on any row when it is not empty |
+| OT Pay | formula | `OT Hours × (Daily Salary ÷ Required Hours)` |
 | Incentive (+) | **you fill in** | Added to the day's payment |
 | Deduction (-) | **you fill in** | Subtracted from the day's payment |
 | Adjustment Note | **you fill in** | Why the incentive or deduction was applied |
-| Net Payable | formula | `Payment for Day + Incentive − Deduction` |
+| Net Payable | formula | `Payment for Day + OT Pay + Incentive − Deduction` |
 
 The formulas are written as real Excel formulas, so the whole chain recalculates the
 moment a monthly salary, incentive or deduction is typed into the downloaded file.
 
 A day with no recorded hours counts as 0% completion, which pays 0 for that day.
+
+### Overtime
+
+OT is credited when the status column contains `off` or `holiday` — `Day Off`, `Weekly
+Off`, `Holiday` all match — **and** hours were actually worked that day. The worked hours
+are capped at the daily requirement before the 1.5 multiplier, so a 14-hour day off pays
+`1.5 × 12 = 18` OT hours, not 21.
+
+`Manual OT Hours` wins whenever it holds a value, on any row, day off or not.
 
 ### Exported workbook
 
