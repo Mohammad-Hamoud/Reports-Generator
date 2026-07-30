@@ -293,7 +293,7 @@
   var TABS = [
     { id: "casuals-detailed", title: "Casuals Detailed Report", mode: "casuals" },
     { id: "fte-detailed",     title: "FTE Detailed Report",     mode: "merge" },
-    { id: "casual-summary",   title: "Casual Period Summary",   mode: "basic" },
+    { id: "casual-summary",   title: "Casual Period Summary",   mode: "period" },
     { id: "fte-summary",      title: "FTE Period Summary",      mode: "basic" }
   ];
 
@@ -432,6 +432,12 @@
   // "  2497070512   Employee Name: SHOHAG MIAH" packs two fields into one cell.
   var NAME_IN_CODE = /^\s*(.*?)\s*Employee\s*Name\s*:\s*(.*?)\s*$/i;
 
+  // Some codes arrive with stray punctuation — "2210121170.", "C2258045489-",
+  // ": 2261366641". Left alone they split one employee into two.
+  function tidyEmployeeCode(code) {
+    return String(code).replace(/^[\s.,:;\-_/\\]+/, "").replace(/[\s.,:;\-_/\\]+$/, "");
+  }
+
   function splitEmployeeColumn(headers, rows) {
     for (var c = 0; c < headers.length; c++) {
       var matches = 0, filled = 0;
@@ -450,7 +456,7 @@
         var value = row[c];
         var parts = typeof value === "string" ? value.match(NAME_IN_CODE) : null;
         row.splice(c + 1, 0, parts ? parts[2] : "");
-        if (parts) row[c] = parts[1];
+        if (parts) row[c] = tidyEmployeeCode(parts[1]);
       });
       return true;
     }
@@ -1077,6 +1083,658 @@
     line("Step 2", "Daily Salary, Payment, OT Pay and Net Payable calculate themselves.");
     line("Step 3", "Add Cost Center, Incentive / Deduction and a note where needed.");
     line("Step 4", "Type into Manual OT Hours only to override the calculated OT.");
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Casual Period Summary — takes the Casuals Detailed Report back in and
+   * rolls it up: one line per employee, then per-supplier cost-centre and
+   * attendance sheets.
+   * ------------------------------------------------------------------ */
+
+  var NO_SUPPLIER = "(No supplier)";
+  var NO_COST_CENTER = "(Unassigned)";
+
+  // The columns the roll-up needs, found by header name so a report generated
+  // before a column was added still works.
+  var SUMMARY_KEYS = [
+    { key: "code",       patterns: [/employee\s*code/i, /^code$/i, /badge/i] },
+    { key: "name",       patterns: [/employee\s*name/i, /^name$/i] },
+    { key: "empType",    patterns: [/employee\s*type/i] },
+    { key: "department", patterns: [/department/i] },
+    { key: "company",    patterns: [/^company$/i] },
+    { key: "supplier",   patterns: [/supplier/i] },
+    { key: "costCenter", patterns: [/cost\s*cent(er|re)/i] },
+    { key: "date",       patterns: [/^date$/i, /\bdate\b/i] },
+    { key: "status",     patterns: [/^status$/i] },
+    { key: "hours",      patterns: [/^total\s*hours$/i, /total\s*hours/i] },
+    { key: "required",   patterns: [/required\s*hours/i] },
+    { key: "pct",        patterns: [/completion/i] },
+    { key: "monthly",    patterns: [/monthly\s*salary/i] },
+    { key: "days",       patterns: [/days\s*in\s*month/i] },
+    { key: "daily",      patterns: [/daily\s*salary/i] },
+    { key: "payment",    patterns: [/payment\s*for\s*day/i] },
+    { key: "excess",     patterns: [/excess\s*above/i] },
+    { key: "dayOff",     patterns: [/day\s*off\s*\?/i, /^day\s*off$/i] },
+    { key: "otHours",    patterns: [/^ot\s*hours$/i] },
+    { key: "manualOt",   patterns: [/manual\s*ot/i] },
+    { key: "otPay",      patterns: [/^ot\s*pay$/i] },
+    { key: "incentive",  patterns: [/incentive/i] },
+    { key: "deduction",  patterns: [/deduction/i] },
+    { key: "note",       patterns: [/adjustment\s*note/i] },
+    { key: "net",        patterns: [/net\s*payable/i] }
+  ];
+
+  /** Columns rebuilt as formulas on the supplier sheets, so edits stay live. */
+  var RECALCULATED_KEYS = {
+    pct: 1, days: 1, daily: 1, payment: 1, excess: 1, dayOff: 1, otHours: 1, otPay: 1, net: 1
+  };
+
+  var SUMMARY_FORMATS = {
+    date: "dd-mmm-yyyy", hours: "0.00", required: "0.00", pct: "0.0%",
+    monthly: "#,##0.00", days: "0", daily: "#,##0.00", payment: "#,##0.00",
+    excess: "#,##0.00", otHours: "0.00", manualOt: "0.00", otPay: "#,##0.00",
+    incentive: "#,##0.00", deduction: "#,##0.00", net: "#,##0.00"
+  };
+
+  function detectSummaryColumns(headers) {
+    var found = {};
+    var taken = {};
+
+    SUMMARY_KEYS.forEach(function (entry) {
+      for (var p = 0; p < entry.patterns.length; p++) {
+        for (var c = 0; c < headers.length; c++) {
+          if (taken[c]) continue;
+          if (entry.patterns[p].test(headers[c])) {
+            found[entry.key] = c;
+            taken[c] = true;
+            return;
+          }
+        }
+      }
+    });
+    return found;
+  }
+
+  /**
+   * SUMIFS and COUNTIFS compare loosely: "123." matches the number 123, and text
+   * matching ignores case. Grouping on the same rule keeps the numbers shown on
+   * screen identical to what the workbook's formulas will produce — otherwise two
+   * codes Excel considers equal would be listed as two employees and each of
+   * their SUMIFS would silently return the pair's combined total.
+   */
+  function excelMatchKey(text) {
+    var trimmed = String(text === null || text === undefined ? "" : text).trim();
+    if (trimmed === "") return "t:";
+    var number = Number(trimmed);
+    return isFinite(number) ? "n:" + number : "t:" + trimmed.toLowerCase();
+  }
+
+  function numberAt(row, index) {
+    if (index === undefined) return null;
+    var value = row[index];
+    if (isNumeric(value)) return value;
+    if (typeof value === "string" && value.trim() !== "") {
+      var parsed = parseFloat(value.replace(/,/g, ""));
+      if (isFinite(parsed)) return parsed;
+    }
+    return null;
+  }
+
+  function textAt(row, index) {
+    if (index === undefined) return "";
+    var value = row[index];
+    return isBlank(value) ? "" : String(value).trim();
+  }
+
+  // Excel 31-character sheet names, with the forbidden characters removed and
+  // truncation deduplicated so a pair of sheets always shares its stem.
+  function sheetNamer() {
+    var used = {};
+
+    return function (stem, suffix) {
+      var clean = String(stem).replace(/['\[\]:*?\/\\]/g, " ").replace(/\s+/g, " ").trim() || "Sheet";
+      var budget = 31 - suffix.length;
+      var base = clean.slice(0, budget).trim();
+      var name = base + suffix;
+      var counter = 2;
+
+      while (used[name.toLowerCase()]) {
+        var tag = " " + counter;
+        name = base.slice(0, budget - tag.length).trim() + tag + suffix;
+        counter++;
+      }
+      used[name.toLowerCase()] = true;
+      return name;
+    };
+  }
+
+  function buildPeriodSummary(cleaned, dayOffWords) {
+    var headers = cleaned.headers;
+    var cols = detectSummaryColumns(headers);
+    var missing = ["code", "date"].filter(function (key) { return cols[key] === undefined; });
+    if (missing.length) {
+      throw new Error("This does not look like a Casuals Detailed Report — no " +
+        missing.join(" and ") + " column was found.");
+    }
+
+    var employees = {}, order = [];
+    var suppliers = {}, supplierOrder = [];
+    var dates = [];
+    var monthlyMissing = 0, rowCount = 0;
+
+    var mergedCodes = 0;
+
+    cleaned.rows.forEach(function (row) {
+      var code = textAt(row, cols.code);
+      if (!code) return;
+      rowCount++;
+
+      var codeKey = excelMatchKey(code);
+      var supplier = textAt(row, cols.supplier) || NO_SUPPLIER;
+      var costCenter = textAt(row, cols.costCenter);
+      var status = textAt(row, cols.status);
+      var date = cols.date !== undefined && row[cols.date] instanceof Date ? row[cols.date] : null;
+      if (date) dates.push(date.getTime());
+
+      var hours = numberAt(row, cols.hours) || 0;
+      var required = numberAt(row, cols.required);
+      if (required === null) required = DEFAULT_REQUIRED_HOURS;
+      var monthly = numberAt(row, cols.monthly);
+      if (monthly === null) monthlyMissing++;
+
+      var days = date ? daysInMonth(date) : numberAt(row, cols.days);
+      var daily = monthly !== null && days ? monthly / days : null;
+      var pct = required > 0 ? hours / required : null;
+
+      var payment = daily !== null && pct !== null ? daily * Math.min(pct, 1) : 0;
+      var excess = daily !== null && pct !== null ? daily * Math.max(pct - 1, 0) : 0;
+
+      // Trust a literal Yes/No if the report carries one; otherwise re-derive.
+      var dayOffCell = textAt(row, cols.dayOff);
+      var dayOff = /^yes$/i.test(dayOffCell) ? true
+        : /^no$/i.test(dayOffCell) ? false
+        : isDayOff(status, dayOffWords);
+
+      var manualOt = numberAt(row, cols.manualOt);
+      var otHours = manualOt !== null ? manualOt
+        : (dayOff && hours > 0 ? OT_MULTIPLIER * Math.min(hours, required) : 0);
+      var otPay = daily !== null && required > 0 ? otHours * daily / required : 0;
+
+      var incentive = numberAt(row, cols.incentive) || 0;
+      var deduction = numberAt(row, cols.deduction) || 0;
+      var net = payment + otPay + incentive - deduction;
+
+      if (!employees[codeKey]) {
+        employees[codeKey] = {
+          code: code, name: textAt(row, cols.name), empType: textAt(row, cols.empType),
+          department: textAt(row, cols.department), company: textAt(row, cols.company),
+          supplier: supplier, costCenters: {}, rows: [],
+          records: 0, present: 0, absent: 0, dayOffWorked: 0,
+          hours: 0, pctSum: 0, pctCount: 0, required: required, monthly: monthly, daily: daily,
+          payment: 0, excess: 0, otHours: 0, otPay: 0, incentive: 0, deduction: 0, net: 0
+        };
+        order.push(codeKey);
+      } else if (employees[codeKey].code !== code) {
+        mergedCodes++;
+      }
+
+      var employee = employees[codeKey];
+      employee.costCenters[costCenter || NO_COST_CENTER] = true;
+      employee.records++;
+      if (/^present$/i.test(status)) employee.present++;
+      if (/^absent$/i.test(status)) employee.absent++;
+      if (dayOff && hours > 0) employee.dayOffWorked++;
+      employee.hours += hours;
+      if (pct !== null) { employee.pctSum += pct; employee.pctCount++; }
+      if (employee.monthly === null && monthly !== null) { employee.monthly = monthly; employee.daily = daily; }
+      employee.payment += payment;
+      employee.excess += excess;
+      employee.otHours += otHours;
+      employee.otPay += otPay;
+      employee.incentive += incentive;
+      employee.deduction += deduction;
+      employee.net += net;
+
+      if (!suppliers[supplier]) {
+        suppliers[supplier] = { name: supplier, rows: [], employees: {}, costCenters: {}, net: 0 };
+        supplierOrder.push(supplier);
+      }
+      var group = suppliers[supplier];
+      group.rows.push(row);
+      group.employees[code] = true;
+      group.net += net;
+
+      var ccKey = excelMatchKey(costCenter);
+      if (!group.costCenters[ccKey]) {
+        group.costCenters[ccKey] = {
+          criteria: costCenter, label: costCenter || NO_COST_CENTER,
+          employees: {}, records: 0, hours: 0,
+          payment: 0, excess: 0, otHours: 0, otPay: 0, incentive: 0, deduction: 0, net: 0
+        };
+      }
+      var bucket = group.costCenters[ccKey];
+      bucket.employees[code] = true;
+      bucket.records++;
+      bucket.hours += hours;
+      bucket.payment += payment;
+      bucket.excess += excess;
+      bucket.otHours += otHours;
+      bucket.otPay += otPay;
+      bucket.incentive += incentive;
+      bucket.deduction += deduction;
+      bucket.net += net;
+    });
+
+    // biggest suppliers first — the small ones end up at the far right
+    supplierOrder.sort(function (a, b) { return suppliers[b].rows.length - suppliers[a].rows.length; });
+
+    var namer = sheetNamer();
+    supplierOrder.forEach(function (name) {
+      var group = suppliers[name];
+      group.costSheet = namer(name, " - Cost");
+      group.attSheet = namer(name, " - Att");
+      group.costCenterList = Object.keys(group.costCenters)
+        .map(function (key) { return group.costCenters[key]; })
+        .sort(function (a, b) { return b.net - a.net || a.label.localeCompare(b.label); });
+      group.employeeCount = Object.keys(group.employees).length;
+    });
+
+    var employeeList = order.map(function (key) {
+      var employee = employees[key];
+      employee.averagePct = employee.pctCount ? employee.pctSum / employee.pctCount : null;
+      employee.costCenterText = Object.keys(employee.costCenters).sort().join(", ");
+      employee.supplierGroup = suppliers[employee.supplier];
+      return employee;
+    }).sort(function (a, b) {
+      return a.supplier.localeCompare(b.supplier) || a.name.localeCompare(b.name);
+    });
+
+    dates.sort(function (a, b) { return a - b; });
+
+    return {
+      headers: headers,
+      cols: cols,
+      employees: employeeList,
+      suppliers: supplierOrder.map(function (name) { return suppliers[name]; }),
+      rowCount: rowCount,
+      firstDay: dates.length ? new Date(dates[0]) : null,
+      lastDay: dates.length ? new Date(dates[dates.length - 1]) : null,
+      monthlyMissing: monthlyMissing,
+      mergedCodes: mergedCodes,
+      totals: employeeList.reduce(function (all, e) {
+        all.hours += e.hours; all.payment += e.payment; all.excess += e.excess;
+        all.otHours += e.otHours; all.otPay += e.otPay; all.incentive += e.incentive;
+        all.deduction += e.deduction; all.net += e.net; all.records += e.records;
+        return all;
+      }, { hours: 0, payment: 0, excess: 0, otHours: 0, otPay: 0, incentive: 0, deduction: 0, net: 0, records: 0 })
+    };
+  }
+
+  var PERIOD_SUMMARY_COLUMNS = [
+    { title: "Employee Code",         key: "code",       role: SOURCE },
+    { title: "Employee Name",         key: "name",       role: SOURCE },
+    { title: "Employee Type",         key: "empType",    role: SOURCE },
+    { title: "Department",            key: "department", role: SOURCE },
+    { title: "Company",               key: "company",    role: SOURCE },
+    { title: "Supplier",              key: "supplier",   role: SOURCE },
+    { title: "Cost Center(s)",        key: "costCenter", role: SOURCE },
+    { title: "Day Records",           key: "records",    role: CALC, format: "0" },
+    { title: "Days Present",          key: "present",    role: CALC, format: "0" },
+    { title: "Days Absent",           key: "absent",     role: CALC, format: "0" },
+    { title: "Day-off Shifts Worked", key: "dayOffWorked", role: CALC, format: "0" },
+    { title: "Total Actual Hours",    key: "hours",      role: CALC, format: "0.00" },
+    { title: "Required Hours / Day",  key: "required",   role: CALC, format: "0.00" },
+    { title: "Avg Completion %",      key: "averagePct", role: CALC, format: "0.0%" },
+    { title: "Monthly Salary",        key: "monthly",    role: CALC, format: "#,##0.00" },
+    { title: "Daily Salary",          key: "daily",      role: CALC, format: "#,##0.00" },
+    { title: "Total Payment for Days", key: "payment",   role: CALC, format: "#,##0.00" },
+    { title: "Total Excess Above Cap", key: "excess",    role: CALC, format: "#,##0.00" },
+    { title: "Total OT Hours",        key: "otHours",    role: CALC, format: "0.00" },
+    { title: "Total OT Pay",          key: "otPay",      role: CALC, format: "#,##0.00" },
+    { title: "Total Incentive",       key: "incentive",  role: CALC, format: "#,##0.00" },
+    { title: "Total Deduction",       key: "deduction",  role: CALC, format: "#,##0.00" },
+    { title: "Total Net Payable",     key: "net",        role: CALC, format: "#,##0.00" }
+  ];
+
+  var COST_CENTER_COLUMNS = [
+    { title: "Cost Center",       key: "label",     role: SOURCE },
+    { title: "Employees",         key: "employees", role: CALC, format: "0" },
+    { title: "Day Records",       key: "records",   role: CALC, format: "0" },
+    { title: "Total Actual Hours", key: "hours",    role: CALC, format: "0.00" },
+    { title: "Payment for Days",  key: "payment",   role: CALC, format: "#,##0.00" },
+    { title: "Excess Above Cap",  key: "excess",    role: CALC, format: "#,##0.00" },
+    { title: "OT Hours",          key: "otHours",   role: CALC, format: "0.00" },
+    { title: "OT Pay",            key: "otPay",     role: CALC, format: "#,##0.00" },
+    { title: "Incentive",         key: "incentive", role: CALC, format: "#,##0.00" },
+    { title: "Deduction",         key: "deduction", role: CALC, format: "#,##0.00" },
+    { title: "Net Payable",       key: "net",       role: CALC, format: "#,##0.00" }
+  ];
+
+  function quoteSheet(name) { return "'" + name.replace(/'/g, "''") + "'"; }
+
+  function buildPeriodSummaryWorkbook(summary, meta) {
+    var workbook = new ExcelJS.Workbook();
+    workbook.creator = "Reports Generator";
+    workbook.created = new Date();
+    workbook.calcProperties.fullCalcOnLoad = true;
+
+    var cols = summary.cols;
+    var headers = summary.headers;
+
+    /* ---- per-supplier attendance sheets, rebuilt with live formulas ---- */
+
+    // column letters are identical on every supplier sheet: same layout as the
+    // uploaded report
+    var letterOf = {};
+    Object.keys(cols).forEach(function (key) { letterOf[key] = columnLetter(cols[key] + 1); });
+
+    function attendanceFormula(key, r) {
+      var L = letterOf;
+      switch (key) {
+        case "pct":
+          if (!L.hours || !L.required) return undefined;
+          return "IF(" + L.required + r + "=0,\"\",IF(ISNUMBER(" + L.hours + r + ")," + L.hours + r + "/" + L.required + r + ",0))";
+        case "days":
+          if (!L.date) return undefined;
+          return "IF(ISNUMBER(" + L.date + r + "),DAY(EOMONTH(" + L.date + r + ",0)),\"\")";
+        case "daily":
+          if (!L.monthly || !L.days) return undefined;
+          return "IF(OR(" + L.monthly + r + "=\"\"," + L.days + r + "=\"\"),\"\"," + L.monthly + r + "/" + L.days + r + ")";
+        case "payment":
+          if (!L.daily || !L.pct) return undefined;
+          return "IF(OR(" + L.daily + r + "=\"\"," + L.pct + r + "=\"\"),\"\"," + L.daily + r + "*MIN(" + L.pct + r + ",1))";
+        case "excess":
+          if (!L.daily || !L.pct) return undefined;
+          return "IF(OR(" + L.daily + r + "=\"\"," + L.pct + r + "=\"\"),\"\"," + L.daily + r + "*MAX(" + L.pct + r + "-1,0))";
+        case "dayOff":
+          if (!L.status) return undefined;
+          var tests = summary.dayOffWords.map(function (word) {
+            return "ISNUMBER(SEARCH(\"" + word.replace(/"/g, "\"\"") + "\"," + L.status + r + "))";
+          });
+          if (!tests.length) return undefined;
+          return "IF(" + L.status + r + "=\"\",\"\",IF(" +
+            (tests.length > 1 ? "OR(" + tests.join(",") + ")" : tests[0]) + ",\"Yes\",\"No\"))";
+        case "otHours":
+          if (!L.manualOt) return undefined;
+          if (!L.dayOff || !L.hours || !L.required) {
+            return "IF(" + L.manualOt + r + "<>\"\"," + L.manualOt + r + ",\"\")";
+          }
+          return "IF(" + L.manualOt + r + "<>\"\"," + L.manualOt + r +
+            ",IF(AND(" + L.dayOff + r + "=\"Yes\",ISNUMBER(" + L.hours + r + ")," + L.hours + r + ">0)," +
+            OT_MULTIPLIER + "*MIN(" + L.hours + r + "," + L.required + r + "),\"\"))";
+        case "otPay":
+          if (!L.otHours || !L.daily || !L.required) return undefined;
+          return "IF(OR(" + L.otHours + r + "=\"\"," + L.daily + r + "=\"\"," + L.required + r + "=0),\"\"," +
+            L.otHours + r + "*" + L.daily + r + "/" + L.required + r + ")";
+        case "net":
+          if (!L.payment || !L.otPay || !L.incentive || !L.deduction) return undefined;
+          return "IF(AND(" + L.payment + r + "=\"\"," + L.otPay + r + "=\"\"," + L.incentive + r + "=\"\"," + L.deduction + r + "=\"\"),\"\"," +
+            "SUM(" + L.payment + r + "," + L.otPay + r + "," + L.incentive + r + ")-SUM(" + L.deduction + r + "))";
+        default:
+          return undefined;
+      }
+    }
+
+    var keyOfColumn = {};
+    Object.keys(cols).forEach(function (key) { keyOfColumn[cols[key]] = key; });
+
+    summary.suppliers.forEach(function (group) {
+      var sheet = workbook.addWorksheet(group.attSheet, {
+        views: [{ state: "frozen", ySplit: 1, xSplit: Math.min(2, headers.length) }],
+        properties: { defaultRowHeight: 18 }
+      });
+
+      sheet.columns = headers.map(function (title, index) {
+        var key = keyOfColumn[index];
+        var role = key === undefined ? SOURCE
+          : RECALCULATED_KEYS[key] ? CALC
+          : (key === "monthly" || key === "manualOt" || key === "incentive" ||
+             key === "deduction" || key === "note" || key === "costCenter") ? INPUT : SOURCE;
+        return {
+          header: title,
+          width: measureWidth(title, group.rows, index),
+          style: bodyStyle(role, key === undefined ? null : SUMMARY_FORMATS[key] || null)
+        };
+      });
+
+      group.rows.forEach(function (row, index) {
+        var r = index + 2;
+        var line = headers.map(function (title, column) {
+          var key = keyOfColumn[column];
+          if (key !== undefined && RECALCULATED_KEYS[key]) {
+            var formula = attendanceFormula(key, r);
+            if (formula) return { formula: formula };
+            return null;
+          }
+          return isBlank(row[column]) ? null : row[column];
+        });
+        sheet.addRow(line);
+      });
+
+      var headerRow = sheet.getRow(1);
+      headerRow.height = 32;
+      headers.forEach(function (title, index) {
+        var key = keyOfColumn[index];
+        var role = key === undefined ? SOURCE
+          : RECALCULATED_KEYS[key] ? CALC
+          : (key === "monthly" || key === "manualOt" || key === "incentive" ||
+             key === "deduction" || key === "note" || key === "costCenter") ? INPUT : SOURCE;
+        headerRow.getCell(index + 1).style = headerStyle(role);
+      });
+
+      group.lastRow = group.rows.length + 1;
+      sheet.autoFilter = { from: { row: 1, column: 1 }, to: { row: group.lastRow, column: headers.length } };
+    });
+
+    /* ---- per-supplier cost-centre sheets, summing the attendance sheet ---- */
+
+    function range(sheetName, key, lastRow) {
+      return quoteSheet(sheetName) + "!$" + letterOf[key] + "$2:$" + letterOf[key] + "$" + lastRow;
+    }
+
+    summary.suppliers.forEach(function (group) {
+      var sheet = workbook.addWorksheet(group.costSheet, {
+        views: [{ state: "frozen", ySplit: 1 }],
+        properties: { defaultRowHeight: 18 }
+      });
+
+      sheet.columns = COST_CENTER_COLUMNS.map(function (column) {
+        return {
+          header: column.title,
+          width: Math.max(column.title.length + 4, column.key === "label" ? 22 : 14),
+          style: bodyStyle(column.role, column.format || null)
+        };
+      });
+
+      var SUM_KEYS = {
+        hours: "hours", payment: "payment", excess: "excess",
+        otHours: "otHours", otPay: "otPay", incentive: "incentive", deduction: "deduction", net: "net"
+      };
+
+      group.costCenterList.forEach(function (bucket, index) {
+        var r = index + 2;
+        var criteria = "$A" + r;
+        // the unassigned bucket has to match genuinely empty cells
+        var criteriaExpression = bucket.criteria === "" ? "\"\"" : criteria;
+
+        var line = COST_CENTER_COLUMNS.map(function (column) {
+          if (column.key === "label") return bucket.label;
+          if (column.key === "employees") return Object.keys(bucket.employees).length;
+          if (column.key === "records") {
+            return { formula: "COUNTIFS(" + range(group.attSheet, "costCenter", group.lastRow) + "," + criteriaExpression + ")" };
+          }
+          var sumKey = SUM_KEYS[column.key];
+          if (!sumKey || letterOf[sumKey] === undefined || letterOf.costCenter === undefined) return null;
+          return {
+            formula: "SUMIFS(" + range(group.attSheet, sumKey, group.lastRow) + "," +
+              range(group.attSheet, "costCenter", group.lastRow) + "," + criteriaExpression + ")"
+          };
+        });
+        sheet.addRow(line);
+      });
+
+      var last = group.costCenterList.length + 1;
+      var totalRow = sheet.addRow(COST_CENTER_COLUMNS.map(function (column, index) {
+        if (column.key === "label") return "TOTAL";
+        if (last < 2) return null;
+        var letter = columnLetter(index + 1);
+        return { formula: "SUM(" + letter + "2:" + letter + last + ")" };
+      }));
+      totalRow.eachCell(function (cell) {
+        cell.font = { name: "Aptos", size: 11, bold: true };
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFDCFCE7" } };
+        cell.border = BORDER;
+      });
+
+      var headerRow = sheet.getRow(1);
+      headerRow.height = 32;
+      COST_CENTER_COLUMNS.forEach(function (column, index) {
+        headerRow.getCell(index + 1).style = headerStyle(column.role);
+      });
+    });
+
+    /* ---- the period summary, one line per employee ---- */
+
+    var summarySheet = workbook.addWorksheet("Period Summary", {
+      views: [{ state: "frozen", ySplit: 1, xSplit: 2 }],
+      properties: { defaultRowHeight: 18 }
+    });
+
+    summarySheet.columns = PERIOD_SUMMARY_COLUMNS.map(function (column) {
+      return {
+        header: column.title,
+        width: Math.max(column.title.length + 3, 13),
+        style: bodyStyle(column.role, column.format || null)
+      };
+    });
+
+    summary.employees.forEach(function (employee, index) {
+      var r = index + 2;
+      var group = employee.supplierGroup;
+      var codeRef = "$A" + r;
+
+      function sumifs(key) {
+        if (!group || letterOf[key] === undefined || letterOf.code === undefined) return null;
+        return { formula: "SUMIFS(" + range(group.attSheet, key, group.lastRow) + "," +
+          range(group.attSheet, "code", group.lastRow) + "," + codeRef + ")" };
+      }
+      function averageifs(key) {
+        if (!group || letterOf[key] === undefined || letterOf.code === undefined) return null;
+        return { formula: "IFERROR(AVERAGEIFS(" + range(group.attSheet, key, group.lastRow) + "," +
+          range(group.attSheet, "code", group.lastRow) + "," + codeRef + "),\"\")" };
+      }
+      function countifs(extra) {
+        if (!group || letterOf.code === undefined) return null;
+        return { formula: "COUNTIFS(" + range(group.attSheet, "code", group.lastRow) + "," + codeRef +
+          (extra || "") + ")" };
+      }
+
+      var values = {
+        code: employee.code,
+        name: employee.name,
+        empType: employee.empType,
+        department: employee.department,
+        company: employee.company,
+        supplier: employee.supplier,
+        costCenter: employee.costCenterText,
+        records: countifs(),
+        present: letterOf.status ? countifs("," + range(group.attSheet, "status", group.lastRow) + ",\"Present\"") : null,
+        absent: letterOf.status ? countifs("," + range(group.attSheet, "status", group.lastRow) + ",\"Absent\"") : null,
+        dayOffWorked: letterOf.dayOff && letterOf.hours
+          ? countifs("," + range(group.attSheet, "dayOff", group.lastRow) + ",\"Yes\"," +
+              range(group.attSheet, "hours", group.lastRow) + ",\">0\"")
+          : null,
+        hours: sumifs("hours"),
+        required: averageifs("required"),
+        averagePct: averageifs("pct"),
+        monthly: averageifs("monthly"),
+        daily: averageifs("daily"),
+        payment: sumifs("payment"),
+        excess: sumifs("excess"),
+        otHours: sumifs("otHours"),
+        otPay: sumifs("otPay"),
+        incentive: sumifs("incentive"),
+        deduction: sumifs("deduction"),
+        net: sumifs("net")
+      };
+
+      summarySheet.addRow(PERIOD_SUMMARY_COLUMNS.map(function (column) { return values[column.key]; }));
+    });
+
+    var summaryLast = summary.employees.length + 1;
+    var summaryTotal = summarySheet.addRow(PERIOD_SUMMARY_COLUMNS.map(function (column, index) {
+      if (column.key === "code") return "TOTAL";
+      if (column.key === "name") return summary.employees.length + " employees";
+      var TOTALLED = {
+        records: 1, present: 1, absent: 1, dayOffWorked: 1, hours: 1,
+        payment: 1, excess: 1, otHours: 1, otPay: 1, incentive: 1, deduction: 1, net: 1
+      };
+      if (!TOTALLED[column.key] || summaryLast < 2) return null;
+      var letter = columnLetter(index + 1);
+      return { formula: "SUM(" + letter + "2:" + letter + summaryLast + ")" };
+    }));
+    summaryTotal.eachCell(function (cell) {
+      cell.font = { name: "Aptos", size: 11, bold: true };
+      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFDCFCE7" } };
+      cell.border = BORDER;
+    });
+
+    var summaryHeader = summarySheet.getRow(1);
+    summaryHeader.height = 32;
+    PERIOD_SUMMARY_COLUMNS.forEach(function (column, index) {
+      summaryHeader.getCell(index + 1).style = headerStyle(column.role);
+    });
+    summarySheet.autoFilter = { from: { row: 1, column: 1 }, to: { row: summaryLast, column: PERIOD_SUMMARY_COLUMNS.length } };
+
+    /* ---- suppliers index ---- */
+
+    var indexSheet = workbook.addWorksheet("Suppliers", { properties: { defaultRowHeight: 18 } });
+    var INDEX_COLUMNS = [
+      { title: "Supplier", width: 40 }, { title: "Employees", width: 12, format: "0" },
+      { title: "Day Records", width: 13, format: "0" }, { title: "Net Payable", width: 16, format: "#,##0.00" },
+      { title: "Cost Center Sheet", width: 30 }, { title: "Attendance Sheet", width: 30 }
+    ];
+    indexSheet.columns = INDEX_COLUMNS.map(function (column) {
+      return { header: column.title, width: column.width, style: bodyStyle(SOURCE, column.format || null) };
+    });
+
+    summary.suppliers.forEach(function (group) {
+      indexSheet.addRow([
+        group.name, group.employeeCount, group.rows.length,
+        letterOf.net !== undefined
+          ? { formula: "SUM(" + range(group.attSheet, "net", group.lastRow) + ")" }
+          : null,
+        group.costSheet, group.attSheet
+      ]);
+    });
+
+    var indexHeader = indexSheet.getRow(1);
+    indexHeader.height = 26;
+    INDEX_COLUMNS.forEach(function (column, index) { indexHeader.getCell(index + 1).style = headerStyle(SOURCE); });
+
+    indexSheet.addRow([]);
+    var metaRows = [
+      ["Source file", meta.fileName],
+      ["Period", summary.firstDay ? formatDate(summary.firstDay) + " to " + formatDate(summary.lastDay) : "—"],
+      ["Day records", summary.rowCount],
+      ["Employees", summary.employees.length],
+      ["Suppliers", summary.suppliers.length],
+      ["Generated", new Date().toLocaleString()]
+    ];
+    metaRows.forEach(function (pair) {
+      var row = indexSheet.addRow(pair);
+      row.getCell(1).font = { name: "Aptos", size: 11, bold: true };
+    });
+
+    // Period Summary first, then every cost-centre sheet, then the attendance
+    // sheets — the order the report is read in.
+    var wanted = ["Period Summary", "Suppliers"]
+      .concat(summary.suppliers.map(function (g) { return g.costSheet; }))
+      .concat(summary.suppliers.map(function (g) { return g.attSheet; }));
+    workbook.worksheets.forEach(function (sheet) { sheet.orderNo = wanted.indexOf(sheet.name); });
+    workbook.worksheets.sort(function (a, b) { return a.orderNo - b.orderNo; });
+
+    return workbook;
   }
 
   /* ================================================================== *
@@ -1873,6 +2531,371 @@
     data.views = [{ state: "frozen", ySplit: 1 }];
 
     return workbook;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * period-summary panel (Casual Period Summary)
+   * ------------------------------------------------------------------ */
+
+  function createPeriodPanel(tab) {
+    var state = { fileName: "", cleaned: null, summary: null };
+
+    var panel = el("section", "panel");
+    panel.id = "panel-" + tab.id;
+    panel.setAttribute("role", "tabpanel");
+    panel.setAttribute("aria-labelledby", "tab-" + tab.id);
+
+    /* ---- upload ---- */
+    var uploadCard = el("div", "card");
+    uploadCard.appendChild(el("h2", null, tab.title));
+    uploadCard.appendChild(el("p", "sub",
+      "Upload the report generated by the Casuals Detailed Report tab — with or without the " +
+      "monthly salaries, cost centers and adjustments filled in."));
+
+    var drop = el("div", "drop");
+    drop.tabIndex = 0;
+    drop.setAttribute("role", "button");
+    drop.setAttribute("aria-label", "Upload a Casuals Detailed Report");
+    drop.innerHTML =
+      '<div class="icon" aria-hidden="true">&#128203;</div>' +
+      '<span class="big">Drag &amp; drop the detailed report here</span>' +
+      '<span class="small">or click to browse &mdash; .xlsx, .xls</span>';
+
+    var input = el("input");
+    input.type = "file";
+    input.accept = ".xlsx,.xls,.xlsm,.xlsb";
+    drop.appendChild(input);
+    uploadCard.appendChild(drop);
+
+    var filebar = el("div", "filebar");
+    var fileName = el("span", "name");
+    var fileMeta = el("span", "meta");
+    filebar.appendChild(el("span", null, "✓"));
+    filebar.appendChild(fileName);
+    filebar.appendChild(fileMeta);
+    uploadCard.appendChild(filebar);
+
+    var alert = el("div", "alert");
+    alert.setAttribute("role", "alert");
+    uploadCard.appendChild(alert);
+
+    var actions = el("div", "actions");
+    var generateBtn = el("button", "btn btn-primary", "Generate period summary");
+    var downloadBtn = el("button", "btn btn-secondary", "Download period summary (.xlsx)");
+    generateBtn.type = "button";
+    downloadBtn.type = "button";
+    generateBtn.disabled = true;
+    downloadBtn.disabled = true;
+    actions.appendChild(generateBtn);
+    actions.appendChild(downloadBtn);
+    uploadCard.appendChild(actions);
+
+    var detected = el("ul", "notes");
+    uploadCard.appendChild(detected);
+    panel.appendChild(uploadCard);
+
+    /* ---- report ---- */
+    var reportCard = el("div", "card");
+    reportCard.appendChild(el("h2", null, "Period summary"));
+    reportCard.appendChild(el("p", "sub", "Totals for the whole period, and the sheets that will be produced."));
+    var reportBody = el("div");
+    reportBody.appendChild(el("div", "empty", "Upload a detailed report and generate the summary."));
+    reportCard.appendChild(reportBody);
+    panel.appendChild(reportCard);
+
+    /* ---- preview ---- */
+    var previewCard = el("div", "card");
+    previewCard.appendChild(el("h2", null, "One line per employee"));
+    previewCard.appendChild(el("p", "sub", "First " + PREVIEW_ROWS + " employees of the period summary sheet."));
+    var previewBody = el("div");
+    previewBody.appendChild(el("div", "empty", "No summary yet."));
+    previewCard.appendChild(previewBody);
+    panel.appendChild(previewCard);
+
+    function showError(message) {
+      alert.className = "alert show";
+      alert.textContent = message;
+    }
+
+    function showWarning(message) {
+      alert.className = "alert warn show";
+      alert.textContent = message;
+    }
+
+    function clearError() {
+      alert.className = "alert";
+      alert.textContent = "";
+    }
+
+    /* ---- rendering ---- */
+
+    function renderDetected() {
+      detected.innerHTML = "";
+      if (!state.cleaned) return;
+
+      var cols = detectSummaryColumns(state.cleaned.headers);
+      var names = ["code", "name", "supplier", "costCenter", "date", "status", "hours", "monthly", "net"]
+        .filter(function (key) { return cols[key] !== undefined; })
+        .map(function (key) { return state.cleaned.headers[cols[key]]; });
+
+      detected.appendChild(el("li", null, "Recognised columns: " + names.join(", ")));
+      detected.appendChild(el("li", null,
+        "Every calculated column is recomputed from the raw values, so the totals are right whether " +
+        "or not Excel had cached its formulas."));
+    }
+
+    function renderPreview() {
+      previewBody.innerHTML = "";
+      if (!state.summary) {
+        previewBody.appendChild(el("div", "empty", "No summary yet."));
+        return;
+      }
+
+      var scroll = el("div", "table-scroll");
+      var table = el("table");
+
+      var thead = el("thead");
+      var headRow = el("tr");
+      PERIOD_SUMMARY_COLUMNS.forEach(function (column) {
+        headRow.appendChild(el("th", column.role === CALC ? "h-calc" : null, column.title));
+      });
+      thead.appendChild(headRow);
+      table.appendChild(thead);
+
+      var tbody = el("tbody");
+      state.summary.employees.slice(0, PREVIEW_ROWS).forEach(function (employee) {
+        var tr = el("tr");
+        PERIOD_SUMMARY_COLUMNS.forEach(function (column) {
+          var value = employee[column.key === "costCenter" ? "costCenterText" : column.key];
+          var text;
+          if (column.format === "0.0%") text = value === null ? "" : (value * 100).toFixed(1) + "%";
+          else if (column.format === "#,##0.00") text = value === null ? "" : formatNumber(value, 2);
+          else if (column.format === "0.00") text = value === null ? "" : formatNumber(value, 2);
+          else if (column.format === "0") text = value === null ? "" : formatNumber(value, 0);
+          else text = value === null || value === undefined ? "" : String(value);
+
+          var td = el("td", (column.role === CALC ? "c-calc " : "") + (isNumeric(value) ? "num" : ""), text);
+          td.title = text;
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+
+      scroll.appendChild(table);
+      previewBody.appendChild(scroll);
+      previewBody.appendChild(el("div", "hint",
+        "Showing " + Math.min(PREVIEW_ROWS, state.summary.employees.length) + " of " +
+        state.summary.employees.length.toLocaleString() + " employees. In the downloaded file every total is " +
+        "a SUMIFS over that employee's supplier sheet, so editing an adjustment updates the summary."));
+    }
+
+    function renderReport() {
+      reportBody.innerHTML = "";
+      if (!state.summary) {
+        reportBody.appendChild(el("div", "empty", "Upload a detailed report and generate the summary."));
+        return;
+      }
+
+      var summary = state.summary;
+      var stats = el("div", "stats");
+      [
+        ["Employees", summary.employees.length.toLocaleString()],
+        ["Suppliers", summary.suppliers.length.toLocaleString()],
+        ["Day records", summary.rowCount.toLocaleString()],
+        ["Total hours", formatNumber(summary.totals.hours, 2)],
+        ["Total OT pay", formatNumber(summary.totals.otPay, 2)],
+        ["Total net payable", formatNumber(summary.totals.net, 2)]
+      ].forEach(function (pair) {
+        var box = el("div", "stat");
+        box.appendChild(el("div", "label", pair[0]));
+        box.appendChild(el("div", "value", pair[1]));
+        stats.appendChild(box);
+      });
+      reportBody.appendChild(stats);
+
+      reportBody.appendChild(el("div", "hint",
+        (summary.firstDay ? "Period: " + formatDate(summary.firstDay) + " to " + formatDate(summary.lastDay) + " · " : "") +
+        "payment for days: " + formatNumber(summary.totals.payment, 2) +
+        " · incentives: " + formatNumber(summary.totals.incentive, 2) +
+        " · deductions: " + formatNumber(summary.totals.deduction, 2) +
+        " · workbook sheets: " + (2 + summary.suppliers.length * 2)));
+
+      var box = el("div", "subtable");
+      box.appendChild(el("h3", null, "Suppliers — two sheets each"));
+
+      var scroll = el("div", "table-scroll");
+      scroll.style.maxHeight = "300px";
+      var table = el("table");
+
+      var thead = el("thead");
+      var headRow = el("tr");
+      ["Supplier", "Employees", "Day records", "Cost centers", "Net payable", "Cost center sheet", "Attendance sheet"]
+        .forEach(function (title) { headRow.appendChild(el("th", null, title)); });
+      thead.appendChild(headRow);
+      table.appendChild(thead);
+
+      var tbody = el("tbody");
+      summary.suppliers.forEach(function (group) {
+        var tr = el("tr");
+        [group.name, group.employeeCount, group.rows.length, group.costCenterList.length,
+         formatNumber(group.net, 2), group.costSheet, group.attSheet
+        ].forEach(function (value, index) {
+          var td = el("td", index >= 1 && index <= 4 ? "num" : null, String(value));
+          td.title = td.textContent;
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+
+      scroll.appendChild(table);
+      box.appendChild(scroll);
+      reportBody.appendChild(box);
+
+      if (summary.mergedCodes) {
+        reportBody.appendChild(el("div", "hint",
+          summary.mergedCodes.toLocaleString() + " row" + (summary.mergedCodes === 1 ? "" : "s") +
+          " carried an employee code that differs only by punctuation or letter case from another one " +
+          "(\"2210121170.\" against \"2210121170\"). Excel's SUMIFS treats those as the same employee, " +
+          "so they are summarised as one line here too."));
+      }
+
+      if (summary.monthlyMissing) {
+        reportBody.appendChild(el("div", "hint",
+          summary.monthlyMissing.toLocaleString() + " of " + summary.rowCount.toLocaleString() +
+          " rows have no Monthly Salary, so their payment and OT pay count as zero. Fill the amber " +
+          "Monthly Salary column in the detailed report first if that is not intended."));
+      }
+    }
+
+    /* ---- file handling ---- */
+
+    function handleFile(file) {
+      if (!file) return;
+
+      if (typeof XLSX === "undefined" || typeof ExcelJS === "undefined") {
+        showError("The Excel libraries could not be loaded. Check your internet connection and reload the page.");
+        return;
+      }
+
+      if (!/\.(xlsx|xls|xlsm|xlsb)$/i.test(file.name)) {
+        showError("“" + file.name + "” is not an Excel file. Please upload a .xlsx or .xls workbook.");
+        return;
+      }
+
+      clearError();
+      fileName.textContent = file.name;
+      fileMeta.textContent = "reading…";
+      filebar.classList.add("show");
+
+      readWorkbook(file).then(function (cleaned) {
+        state.fileName = file.name;
+        state.cleaned = cleaned;
+        state.summary = null;
+
+        fileMeta.textContent = formatBytes(file.size) + " · " + cleaned.rows.length +
+          " rows · " + cleaned.headers.length + " columns";
+
+        generateBtn.disabled = false;
+        downloadBtn.disabled = true;
+        renderDetected();
+        renderReport();
+        renderPreview();
+      }).catch(function (error) {
+        filebar.classList.remove("show");
+        showError(error.message || String(error));
+      });
+    }
+
+    drop.addEventListener("click", function () { input.click(); });
+    drop.addEventListener("keydown", function (event) {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        input.click();
+      }
+    });
+    input.addEventListener("change", function () {
+      handleFile(input.files[0]);
+      input.value = "";
+    });
+
+    ["dragenter", "dragover"].forEach(function (name) {
+      drop.addEventListener(name, function (event) {
+        event.preventDefault();
+        drop.classList.add("is-over");
+      });
+    });
+    ["dragleave", "dragend", "drop"].forEach(function (name) {
+      drop.addEventListener(name, function () { drop.classList.remove("is-over"); });
+    });
+    drop.addEventListener("drop", function (event) {
+      event.preventDefault();
+      if (event.dataTransfer && event.dataTransfer.files.length) handleFile(event.dataTransfer.files[0]);
+    });
+
+    /* ---- actions ---- */
+
+    function withBusy(button, label, work) {
+      var original = button.textContent;
+      button.textContent = label;
+      button.disabled = true;
+
+      setTimeout(function () {
+        var finish = function () {
+          button.textContent = original;
+          button.disabled = false;
+        };
+        try {
+          var result = work();
+          if (result && typeof result.then === "function") {
+            result.then(finish, function (error) {
+              finish();
+              showError("Could not build the workbook: " + (error.message || error));
+            });
+          } else finish();
+        } catch (error) {
+          finish();
+          showError(error.message || String(error));
+        }
+      }, 30);
+    }
+
+    generateBtn.addEventListener("click", function () {
+      if (!state.cleaned) return;
+      clearError();
+
+      withBusy(generateBtn, "Summarising…", function () {
+        var summary = buildPeriodSummary(state.cleaned, parseKeywords(DEFAULT_DAY_OFF_WORDS));
+        summary.dayOffWords = parseKeywords(DEFAULT_DAY_OFF_WORDS);
+        state.summary = summary;
+        renderReport();
+        renderPreview();
+        downloadBtn.disabled = summary.employees.length === 0;
+        if (!summary.employees.length) showError("No employee rows were found in this report.");
+        else if (summary.monthlyMissing === summary.rowCount) {
+          showWarning("No Monthly Salary was filled in anywhere, so every payment total is zero. " +
+            "The attendance and OT hours are still summarised.");
+        }
+      });
+    });
+
+    downloadBtn.addEventListener("click", function () {
+      if (!state.summary) return;
+      clearError();
+
+      withBusy(downloadBtn, "Building file…", function () {
+        var workbook = buildPeriodSummaryWorkbook(state.summary, { fileName: state.fileName });
+        return workbook.xlsx.writeBuffer().then(function (buffer) {
+          downloadBlob(
+            new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }),
+            "casual-period-summary.xlsx"
+          );
+        });
+      });
+    });
+
+    return panel;
   }
 
   /* ------------------------------------------------------------------ *
@@ -2992,7 +4015,10 @@
 
     tablist.appendChild(button);
     buttons.push(button);
-    panels.appendChild(tab.mode === "merge" ? createMergePanel(tab) : createPanel(tab));
+    panels.appendChild(
+      tab.mode === "merge" ? createMergePanel(tab)
+        : tab.mode === "period" ? createPeriodPanel(tab)
+        : createPanel(tab));
   });
 
   select(0);

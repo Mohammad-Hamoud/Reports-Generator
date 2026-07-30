@@ -13,7 +13,7 @@ Libraries loaded from CDN:
 
 1. **Casuals Detailed Report** — timesheet cleanup + payroll columns (see below)
 2. **FTE Detailed Report** — Report Merge: four system exports into one attendance file
-3. **Casual Period Summary** — generic placeholder summary
+3. **Casual Period Summary** — rolls the detailed report up per employee and per supplier
 4. **FTE Period Summary** — generic placeholder summary
 
 Each tab is independent: it keeps its own uploaded file, preview and generated report.
@@ -136,11 +136,54 @@ The exported workbook has an `Attendance` sheet (the 23 TAS-design columns plus
 `Emp No. (New)`, `Leave Type`, `IN Source`, `OUT Source`; amber = punch from the gate,
 green = leave applied) and a `Summary & Exceptions` sheet.
 
-## Other tabs
+## Casual Period Summary
 
-The remaining two tabs run the same generic placeholder analysis until their own rules
-are defined: row/column/numeric-field counts, plus `count`, `sum`, `average`, `min` and
-`max` per numeric column.
+Takes the workbook produced by the **Casuals Detailed Report** tab back in — with or
+without the monthly salaries, cost centers and adjustments filled in — and rolls it up
+over the period it covers (earliest to latest date in the file).
+
+Every calculated column is **recomputed from the raw values** rather than read back. A
+freshly downloaded report has formulas but no cached results, so reading them would give
+zeros; recomputing means the totals are right either way.
+
+### Sheets produced
+
+1. **`Period Summary`** — one line per employee: identity, cost center(s), day records,
+   days present / absent, day-off shifts worked, total hours, average completion, monthly
+   and daily salary, and totals for payment, excess above cap, OT hours, OT pay,
+   incentives, deductions and **net payable**. A bold TOTAL row closes the sheet.
+2. **`Suppliers`** — an index: every supplier with its employee count, day records, net
+   payable and the names of its two sheets, plus the source file and period.
+3. **`<supplier> - Cost`**, one per supplier — net payment split by cost center: one row
+   per cost center with employees, day records, hours, payment, excess, OT hours, OT pay,
+   incentives, deductions and net payable, and a TOTAL row.
+4. **`<supplier> - Att`**, one per supplier — that supplier's employees' detailed
+   attendance, identical in layout to the Casuals Detailed Report.
+
+Sheet names are truncated to Excel's 31-character limit and deduplicated, and both sheets
+of a supplier share the same stem so the pair is easy to spot. The `Suppliers` index maps
+the full supplier name to both sheet names.
+
+### Everything stays live
+
+The supplier attendance sheets carry the same live formula chain as the detailed report, and
+every figure above them is a `SUMIFS` / `COUNTIFS` / `AVERAGEIFS` over the relevant sheet.
+Change an incentive on a supplier's attendance sheet and its cost-center sheet and the
+period summary both follow.
+
+### Employee codes
+
+`SUMIFS` compares loosely: `2210121170.` matches the number `2210121170`, and text matching
+ignores case. Codes are therefore grouped exactly the way Excel would match them, so the
+figures on screen can never disagree with the workbook's own formulas. The detailed report
+also strips stray leading and trailing punctuation from employee codes now, which is where
+those near-duplicates came from.
+
+## Other tab
+
+The remaining tab runs the same generic placeholder analysis until its own rules are
+defined: row/column/numeric-field counts, plus `count`, `sum`, `average`, `min` and `max`
+per numeric column.
 
 ## Running it
 
