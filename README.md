@@ -179,6 +179,17 @@ figures on screen can never disagree with the workbook's own formulas. The detai
 also strips stray leading and trailing punctuation from employee codes now, which is where
 those near-duplicates came from.
 
+Only genuinely equal codes collapse:
+
+| Pair | Result |
+| --- | --- |
+| `2210121170` / `2210121170.` | one employee — equal as numbers |
+| `C2258047535` / `c2258047535` | one employee — text matching ignores case |
+| `C2258045489` / `2258045489` | **two employees** — a code with a letter is never equal to a bare number |
+
+Every collapse is listed on screen and in an audit block on the `Suppliers` sheet, naming
+the code that was kept and the one it absorbed.
+
 ## Other tab
 
 The remaining tab runs the same generic placeholder analysis until its own rules are

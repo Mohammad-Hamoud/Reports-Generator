@@ -368,6 +368,39 @@
     return new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
   }
 
+  /** A titled, scrollable table for the exception and audit lists. */
+  function exceptionTable(title, headers, rows, emptyNote) {
+    var box = el("div", "subtable");
+    box.appendChild(el("h3", null, title));
+
+    if (!rows.length) {
+      if (emptyNote) box.appendChild(el("div", "hint", emptyNote));
+      return box;
+    }
+
+    var scroll = el("div", "table-scroll");
+    scroll.style.maxHeight = "260px";
+    var table = el("table");
+
+    var thead = el("thead");
+    var headRow = el("tr");
+    headers.forEach(function (header) { headRow.appendChild(el("th", null, header)); });
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+
+    var tbody = el("tbody");
+    rows.forEach(function (row) {
+      var tr = el("tr");
+      row.forEach(function (value) { tr.appendChild(el("td", null, String(value))); });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+
+    scroll.appendChild(table);
+    box.appendChild(scroll);
+    return box;
+  }
+
   function downloadBlob(blob, filename) {
     var url = URL.createObjectURL(blob);
     var link = document.createElement("a");
@@ -1161,6 +1194,10 @@
    * screen identical to what the workbook's formulas will produce — otherwise two
    * codes Excel considers equal would be listed as two employees and each of
    * their SUMIFS would silently return the pair's combined total.
+   *
+   * Only genuinely equal values collapse. A code with a letter is never a number,
+   * so "C2258045489" and "2258045489" stay two separate employees — they are two
+   * different people, and Excel's own matching agrees.
    */
   function excelMatchKey(text) {
     var trimmed = String(text === null || text === undefined ? "" : text).trim();
@@ -1223,6 +1260,7 @@
     var monthlyMissing = 0, rowCount = 0;
 
     var mergedCodes = 0;
+    var mergedPairs = [], mergedSeen = {};
 
     cleaned.rows.forEach(function (row) {
       var code = textAt(row, cols.code);
@@ -1276,6 +1314,11 @@
         order.push(codeKey);
       } else if (employees[codeKey].code !== code) {
         mergedCodes++;
+        var pairKey = employees[codeKey].code + " " + code;
+        if (!mergedSeen[pairKey]) {
+          mergedSeen[pairKey] = true;
+          mergedPairs.push({ kept: employees[codeKey].code, absorbed: code, name: employees[codeKey].name });
+        }
       }
 
       var employee = employees[codeKey];
@@ -1361,6 +1404,7 @@
       lastDay: dates.length ? new Date(dates[dates.length - 1]) : null,
       monthlyMissing: monthlyMissing,
       mergedCodes: mergedCodes,
+      mergedPairs: mergedPairs,
       totals: employeeList.reduce(function (all, e) {
         all.hours += e.hours; all.payment += e.payment; all.excess += e.excess;
         all.otHours += e.otHours; all.otPay += e.otPay; all.incentive += e.incentive;
@@ -1711,6 +1755,24 @@
     var indexHeader = indexSheet.getRow(1);
     indexHeader.height = 26;
     INDEX_COLUMNS.forEach(function (column, index) { indexHeader.getCell(index + 1).style = headerStyle(SOURCE); });
+
+    // An audit trail: which codes were treated as the same employee, and the
+    // rule that keeps letter-prefixed codes out of it.
+    if (summary.mergedPairs.length) {
+      indexSheet.addRow([]);
+      var mergeHead = indexSheet.addRow(["Employee codes summarised as one", "Also matched", "Employee"]);
+      mergeHead.height = 26;
+      for (var mc = 1; mc <= 3; mc++) mergeHead.getCell(mc).style = headerStyle(SOURCE);
+      summary.mergedPairs.forEach(function (pair) {
+        indexSheet.addRow([pair.kept, pair.absorbed, pair.name]);
+      });
+      var ruleRow = indexSheet.addRow([
+        "Rule",
+        "Codes differing only by punctuation or letter case are the same employee to SUMIFS. " +
+        "A code containing a letter is never equal to a bare number, so C2258045489 and 2258045489 stay separate."
+      ]);
+      ruleRow.getCell(1).font = { name: "Aptos", size: 11, bold: true };
+    }
 
     indexSheet.addRow([]);
     var metaRows = [
@@ -2753,12 +2815,16 @@
       box.appendChild(scroll);
       reportBody.appendChild(box);
 
-      if (summary.mergedCodes) {
+      if (summary.mergedPairs.length) {
+        reportBody.appendChild(exceptionTable(
+          "Employee codes summarised as one",
+          ["Kept", "Also matched", "Employee"],
+          summary.mergedPairs.map(function (pair) { return [pair.kept, pair.absorbed, pair.name]; }),
+          ""));
         reportBody.appendChild(el("div", "hint",
-          summary.mergedCodes.toLocaleString() + " row" + (summary.mergedCodes === 1 ? "" : "s") +
-          " carried an employee code that differs only by punctuation or letter case from another one " +
-          "(\"2210121170.\" against \"2210121170\"). Excel's SUMIFS treats those as the same employee, " +
-          "so they are summarised as one line here too."));
+          "These codes are equal as far as Excel's SUMIFS is concerned — they differ only by " +
+          "punctuation or letter case — so one line covers both. A code containing a letter is never " +
+          "equal to a bare number, so \"C2258045489\" and \"2258045489\" stay two separate employees."));
       }
 
       if (summary.monthlyMissing) {
@@ -3164,37 +3230,6 @@
       previewBody.appendChild(el("div", "hint",
         "Showing " + Math.min(PREVIEW_ROWS, rows.length) + " of " + rows.length.toLocaleString() +
         " rows. The downloaded file holds every row plus a Summary & Exceptions sheet."));
-    }
-
-    function exceptionTable(title, headers, rows, emptyNote) {
-      var box = el("div", "subtable");
-      box.appendChild(el("h3", null, title));
-      if (!rows.length) {
-        box.appendChild(el("div", "hint", emptyNote));
-        return box;
-      }
-
-      var scroll = el("div", "table-scroll");
-      scroll.style.maxHeight = "260px";
-      var table = el("table");
-
-      var thead = el("thead");
-      var headRow = el("tr");
-      headers.forEach(function (header) { headRow.appendChild(el("th", null, header)); });
-      thead.appendChild(headRow);
-      table.appendChild(thead);
-
-      var tbody = el("tbody");
-      rows.forEach(function (row) {
-        var tr = el("tr");
-        row.forEach(function (value) { tr.appendChild(el("td", null, String(value))); });
-        tbody.appendChild(tr);
-      });
-      table.appendChild(tbody);
-
-      scroll.appendChild(table);
-      box.appendChild(scroll);
-      return box;
     }
 
     function renderReport() {
