@@ -52,12 +52,13 @@ editable controls before the report is generated.
 | Monthly Salary | **you fill in** | Left empty on purpose |
 | Days in Month | formula | `DAY(EOMONTH(date,0))` → 28/29/30/31 |
 | Daily Salary | formula | `Monthly Salary ÷ Days in Month` |
-| Payment for Day | formula | `Daily Salary × MIN(Completion %, 100%)` — never more than one full day |
-| Excess Above Cap | formula | `Daily Salary × MAX(Completion % − 100%, 0)` — what the cap trimmed off |
+| Payment for Day | formula | A day off pays the full `Daily Salary`; any other day is `Daily Salary × MIN(Completion %, 100%)` |
+| Excess Above Cap | formula | `Daily Salary × MAX(Completion % − 100%, 0)` — what the cap trimmed off. Zero on a day off |
 | Day Off? | formula | `Yes` / `No`, so you can see exactly which rows qualify for OT |
 | OT Hours | formula | On a worked day off: `1.5 × MIN(Total Hours, Required Hours)` |
 | Manual OT Hours | **you fill in** | Overrides OT Hours on any row when it is not empty |
-| OT Pay | formula | `OT Hours × (Daily Salary ÷ Required Hours)` |
+| OT Hour Value (SAR) | **you fill in** | Overrides the OT rate for that row |
+| OT Pay | formula | `OT Hours × OT rate` |
 | Incentive (+) | **you fill in** | Added to the day's payment |
 | Deduction (-) | **you fill in** | Subtracted from the day's payment |
 | Adjustment Note | **you fill in** | Why the incentive or deduction was applied |
@@ -66,7 +67,10 @@ editable controls before the report is generated.
 The formulas are written as real Excel formulas, so the whole chain recalculates the
 moment a monthly salary, incentive or deduction is typed into the downloaded file.
 
-A day with no recorded hours counts as 0% completion, which pays 0 for that day.
+A working day with no recorded hours counts as 0% completion, which pays 0 for that day. A
+**day off always pays the full daily salary**, whether the employee worked it or not — the
+hours worked on a day off are compensated separately as overtime, so the cap trims nothing
+there and `Excess Above Cap` stays 0.
 
 The `Cost Center` column is skipped when the uploaded sheet already has a cost
 centre/center column of its own, so no duplicate is added.
@@ -82,7 +86,21 @@ unrecognised wording is visible before the report is generated.
 The worked hours are capped at the daily requirement before the 1.5 multiplier, so a
 14-hour day off pays `1.5 × 12 = 18` OT hours, not 21.
 
-`Manual OT Hours` wins whenever it holds a value, on any row, day off or not.
+**Hours** — `Manual OT Hours` wins whenever it holds a value, on any row, day off or not.
+
+**Rate** — overtime is always valued against a **fixed 30-day month**, never the calendar
+length, so the same hour is worth the same in February and in July:
+
+```
+OT rate = Monthly Salary ÷ 30 ÷ Required Hours per day
+```
+
+`OT Hour Value (SAR)` overrides that rate for its row. Filled in alongside `Manual OT
+Hours`, `OT Pay` is simply the two multiplied. Left empty, the 30-day rate applies.
+
+With a 3,100 monthly salary and a 12-hour day, the daily salary in July is `3100 ÷ 31 =
+100.00` while the OT rate is `3100 ÷ 30 ÷ 12 = 8.61` — the two deliberately use different
+divisors.
 
 ### Blank cells and typed-in values
 

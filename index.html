@@ -694,6 +694,7 @@
     { key: "dayOff",     title: "Day Off?",              role: CALC,  format: null },
     { key: "otHours",    title: "OT Hours",              role: CALC,  format: "0.00" },
     { key: "manualOt",   title: "Manual OT Hours",       role: INPUT, format: "0.00" },
+    { key: "otValue",    title: "OT Hour Value (SAR)",   role: INPUT, format: "#,##0.00" },
     { key: "otPay",      title: "OT Pay",                role: CALC,  format: "#,##0.00" },
     { key: "incentive",  title: "Incentive (+)",         role: INPUT, format: "#,##0.00" },
     { key: "deduction",  title: "Deduction (-)",         role: INPUT, format: "#,##0.00" },
@@ -702,6 +703,8 @@
   ];
 
   var OT_MULTIPLIER = 1.5;
+  // Overtime is always valued against a 30-day month, whatever the calendar says.
+  var OT_MONTH_DAYS = 30;
   var DEFAULT_DAY_OFF_WORDS = "off, holiday";
 
   // Timesheets spell the non-working day in many ways ("Weekly Off", "Day Off",
@@ -722,6 +725,32 @@
 
   // The uploaded sheet may already carry a cost centre, in which case adding a
   // second empty one would only confuse things.
+  /* The payroll expressions, shared by the detailed report and the per-supplier
+   * attendance sheets so both always carry identical rules. Each takes a map of
+   * column letters, the row number, and returns an expression — never a whole
+   * formula — so the caller controls the surrounding guard. */
+
+  function paymentExpression(L, row, hasDayOff) {
+    var capped = L.daily + row + "*MIN(" + L.pct + row + ",1)";
+    return hasDayOff
+      ? "IF(" + L.dayOff + row + "=\"Yes\"," + L.daily + row + "," + capped + ")"
+      : capped;
+  }
+
+  function excessExpression(L, row, hasDayOff) {
+    var trimmed = L.daily + row + "*MAX(" + L.pct + row + "-1,0)";
+    return hasDayOff ? "IF(" + L.dayOff + row + "=\"Yes\",0," + trimmed + ")" : trimmed;
+  }
+
+  // Overtime is valued at the monthly salary over a fixed 30-day month divided by
+  // the required hours per day — unless an hour value was typed in, which wins.
+  function otPayExpression(L, row) {
+    var atRate = "IF(OR(" + L.monthly + row + "=\"\"," + L.required + row + "=0),\"\"," +
+      L.otHours + row + "*(" + L.monthly + row + "/" + OT_MONTH_DAYS + ")/" + L.required + row + ")";
+    if (!L.otValue) return atRate;
+    return "IF(" + L.otValue + row + "<>\"\"," + L.otHours + row + "*" + L.otValue + row + "," + atRate + ")";
+  }
+
   function payrollColumnsFor(headers) {
     var hasCostCentre = findColumn(headers, [/cost\s*(centre|center)/i]) >= 0;
     return PAYROLL_COLUMNS.filter(function (column) {
@@ -974,14 +1003,20 @@
         monthly: null,                  // filled in by the user
         days: days,
         daily: { formula: "IF(OR(" + letters.monthly + r + "=\"\"," + letters.days + r + "=\"\"),\"\"," + letters.monthly + r + "/" + letters.days + r + ")" },
-        // Payment is capped at one full day's salary...
-        payment: { formula: "IF(OR(" + letters.daily + r + "=\"\"," + letters.pct + r + "=\"\"),\"\"," + letters.daily + r + "*MIN(" + letters.pct + r + ",1))" },
-        // ...and whatever the cap trimmed off is reported next to it.
-        excess: { formula: "IF(OR(" + letters.daily + r + "=\"\"," + letters.pct + r + "=\"\"),\"\"," + letters.daily + r + "*MAX(" + letters.pct + r + "-1,0))" },
+        // A day off pays the full day whether or not it was worked; every other
+        // day is capped at one full day's salary...
+        payment: { formula: "IF(OR(" + letters.daily + r + "=\"\"," + letters.pct + r + "=\"\"),\"\"," +
+          paymentExpression(letters, r, !!dayOff) + ")" },
+        // ...and whatever that cap trimmed off is reported next to it. A day off
+        // trims nothing — the extra hours are paid as overtime instead.
+        excess: { formula: "IF(OR(" + letters.daily + r + "=\"\"," + letters.pct + r + "=\"\"),\"\"," +
+          excessExpression(letters, r, !!dayOff) + ")" },
         dayOff: dayOff,
         otHours: otHours,
         manualOt: null,                 // filled in by the user
-        otPay: { formula: "IF(OR(" + letters.otHours + r + "=\"\"," + letters.daily + r + "=\"\"," + letters.required + r + "=0),\"\"," + letters.otHours + r + "*" + letters.daily + r + "/" + letters.required + r + ")" },
+        otValue: null,                  // filled in by the user — overrides the rate
+        otPay: { formula: "IF(" + letters.otHours + r + "=\"\",\"\"," +
+          otPayExpression(letters, r) + ")" },
         incentive: null,
         deduction: null,
         note: null,
@@ -1103,12 +1138,14 @@
     sheet.addRow([]);
     section("Rules applied");
     line("Payment cap", "Payment for Day never exceeds Daily Salary.");
-    line("Excess Above Cap", "Daily Salary x (Completion % - 100%), when over 100%.");
+    line("Day off pay", "A day off pays the full Daily Salary, worked or not.");
+    line("Excess Above Cap", "Daily Salary x (Completion % - 100%), when over 100%. Zero on a day off.");
     line("Day Off? words", model.dayOffWords.join(", "));
     line("OT trigger", "Day Off? is Yes and a number of hours was recorded.");
     line("OT hours", OT_MULTIPLIER + " x MIN(Total Hours, Required Hours / Day).");
-    line("OT rate", "Daily Salary / Required Hours per day.");
+    line("OT rate", "Monthly Salary / " + OT_MONTH_DAYS + " days / Required Hours per day.");
     line("Manual OT Hours", "Overrides the calculated OT Hours on any row.");
+    line("OT Hour Value (SAR)", "Overrides the OT rate. With Manual OT Hours, OT Pay is the two multiplied.");
 
     sheet.addRow([]);
     section("How to use");
@@ -1150,6 +1187,7 @@
     { key: "dayOff",     patterns: [/day\s*off\s*\?/i, /^day\s*off$/i] },
     { key: "otHours",    patterns: [/^ot\s*hours$/i] },
     { key: "manualOt",   patterns: [/manual\s*ot/i] },
+    { key: "otValue",    patterns: [/ot\s*hour\s*value/i, /ot\s*rate/i] },
     { key: "otPay",      patterns: [/^ot\s*pay$/i] },
     { key: "incentive",  patterns: [/incentive/i] },
     { key: "deduction",  patterns: [/deduction/i] },
@@ -1165,7 +1203,7 @@
   var SUMMARY_FORMATS = {
     date: "dd-mmm-yyyy", hours: "0.00", required: "0.00", pct: "0.0%",
     monthly: "#,##0.00", days: "0", daily: "#,##0.00", payment: "#,##0.00",
-    excess: "#,##0.00", otHours: "0.00", manualOt: "0.00", otPay: "#,##0.00",
+    excess: "#,##0.00", otHours: "0.00", manualOt: "0.00", otValue: "#,##0.00", otPay: "#,##0.00",
     incentive: "#,##0.00", deduction: "#,##0.00", net: "#,##0.00"
   };
 
@@ -1284,19 +1322,25 @@
       var daily = monthly !== null && days ? monthly / days : null;
       var pct = required > 0 ? hours / required : null;
 
-      var payment = daily !== null && pct !== null ? daily * Math.min(pct, 1) : 0;
-      var excess = daily !== null && pct !== null ? daily * Math.max(pct - 1, 0) : 0;
-
       // Trust a literal Yes/No if the report carries one; otherwise re-derive.
       var dayOffCell = textAt(row, cols.dayOff);
       var dayOff = /^yes$/i.test(dayOffCell) ? true
         : /^no$/i.test(dayOffCell) ? false
         : isDayOff(status, dayOffWords);
 
+      // A day off pays the full day however many hours were worked on it.
+      var payment = daily === null || pct === null ? 0
+        : dayOff ? daily : daily * Math.min(pct, 1);
+      var excess = daily === null || pct === null || dayOff ? 0 : daily * Math.max(pct - 1, 0);
+
       var manualOt = numberAt(row, cols.manualOt);
       var otHours = manualOt !== null ? manualOt
         : (dayOff && hours > 0 ? OT_MULTIPLIER * Math.min(hours, required) : 0);
-      var otPay = daily !== null && required > 0 ? otHours * daily / required : 0;
+
+      var otValue = numberAt(row, cols.otValue);
+      var otRate = otValue !== null ? otValue
+        : (monthly !== null && required > 0 ? (monthly / OT_MONTH_DAYS) / required : null);
+      var otPay = otRate === null ? 0 : otHours * otRate;
 
       var incentive = numberAt(row, cols.incentive) || 0;
       var deduction = numberAt(row, cols.deduction) || 0;
@@ -1486,10 +1530,12 @@
           return "IF(OR(" + L.monthly + r + "=\"\"," + L.days + r + "=\"\"),\"\"," + L.monthly + r + "/" + L.days + r + ")";
         case "payment":
           if (!L.daily || !L.pct) return undefined;
-          return "IF(OR(" + L.daily + r + "=\"\"," + L.pct + r + "=\"\"),\"\"," + L.daily + r + "*MIN(" + L.pct + r + ",1))";
+          return "IF(OR(" + L.daily + r + "=\"\"," + L.pct + r + "=\"\"),\"\"," +
+            paymentExpression(L, r, !!L.dayOff) + ")";
         case "excess":
           if (!L.daily || !L.pct) return undefined;
-          return "IF(OR(" + L.daily + r + "=\"\"," + L.pct + r + "=\"\"),\"\"," + L.daily + r + "*MAX(" + L.pct + r + "-1,0))";
+          return "IF(OR(" + L.daily + r + "=\"\"," + L.pct + r + "=\"\"),\"\"," +
+            excessExpression(L, r, !!L.dayOff) + ")";
         case "dayOff":
           if (!L.status) return undefined;
           var tests = summary.dayOffWords.map(function (word) {
@@ -1507,9 +1553,8 @@
             ",IF(AND(" + L.dayOff + r + "=\"Yes\",ISNUMBER(" + L.hours + r + ")," + L.hours + r + ">0)," +
             OT_MULTIPLIER + "*MIN(" + L.hours + r + "," + L.required + r + "),\"\"))";
         case "otPay":
-          if (!L.otHours || !L.daily || !L.required) return undefined;
-          return "IF(OR(" + L.otHours + r + "=\"\"," + L.daily + r + "=\"\"," + L.required + r + "=0),\"\"," +
-            L.otHours + r + "*" + L.daily + r + "/" + L.required + r + ")";
+          if (!L.otHours || !L.monthly || !L.required) return undefined;
+          return "IF(" + L.otHours + r + "=\"\",\"\"," + otPayExpression(L, r) + ")";
         case "net":
           if (!L.payment || !L.otPay || !L.incentive || !L.deduction) return undefined;
           return "IF(AND(" + L.payment + r + "=\"\"," + L.otPay + r + "=\"\"," + L.incentive + r + "=\"\"," + L.deduction + r + "=\"\"),\"\"," +
@@ -1532,7 +1577,7 @@
         var key = keyOfColumn[index];
         var role = key === undefined ? SOURCE
           : RECALCULATED_KEYS[key] ? CALC
-          : (key === "monthly" || key === "manualOt" || key === "incentive" ||
+          : (key === "monthly" || key === "manualOt" || key === "otValue" || key === "incentive" ||
              key === "deduction" || key === "note" || key === "costCenter") ? INPUT : SOURCE;
         return {
           header: title,
@@ -1561,7 +1606,7 @@
         var key = keyOfColumn[index];
         var role = key === undefined ? SOURCE
           : RECALCULATED_KEYS[key] ? CALC
-          : (key === "monthly" || key === "manualOt" || key === "incentive" ||
+          : (key === "monthly" || key === "manualOt" || key === "otValue" || key === "incentive" ||
              key === "deduction" || key === "note" || key === "costCenter") ? INPUT : SOURCE;
         headerRow.getCell(index + 1).style = headerStyle(role);
       });
@@ -3649,6 +3694,7 @@
           dayOff: model.statusIndex < 0 || isBlank(row[model.statusIndex]) ? "" : (info.dayOff ? "Yes" : "No"),
           otHours: info.otHours,
           manualOt: "",
+          otValue: "",
           otPay: "",
           incentive: "",
           deduction: "",
