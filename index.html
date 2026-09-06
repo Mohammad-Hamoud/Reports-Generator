@@ -233,6 +233,14 @@
   .slot .title { font-weight: 650; }
   .slot .detail { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .slot .req { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--amber-600); font-weight: 600; }
+  .slot .pick {
+    appearance: none; border: 0; background: none; padding: 2px 0; margin-top: 3px;
+    font: inherit; font-size: 12px; font-weight: 600; color: var(--green-700);
+    cursor: pointer; text-decoration: underline;
+  }
+  .slot .pick:hover { color: var(--green-600); }
+  .slot .pick:focus-visible { outline: 2px solid var(--green-500); outline-offset: 2px; }
+  .slot input[type="file"] { display: none; }
 
   .subtable { margin-top: 8px; }
   .subtable h3 { font-size: 14px; margin: 18px 0 6px; font-weight: 650; }
@@ -1962,7 +1970,7 @@
   }
 
   function detectReportKind(matrix) {
-    var head = matrix.slice(0, 8).reduce(function (all, row) { return all.concat(row); }, [])
+    var head = matrix.slice(0, 15).reduce(function (all, row) { return all.concat(row); }, [])
       .map(txt).join(" | ").toLowerCase();
 
     if (head.indexOf("old emp no") >= 0) return "active";
@@ -1970,7 +1978,38 @@
     if (head.indexOf("event log") >= 0 ||
         (head.indexOf("detailed access status") >= 0 && head.indexOf("user") >= 0)) return "gate";
     if (head.indexOf("employee code") >= 0 || head.indexOf("detailed report") >= 0) return "tas";
+
+    // An employee roster that carries none of the markers above: a number and a
+    // name is enough. Oracle Fusion exports the active list without the old
+    // number when there is nothing to bridge.
+    if (EMP_NUMBER_LABEL.test(head) && /\bname\b/.test(head)) return "active";
     return null;
+  }
+
+  /** The first row that looks like a header, for telling the user what was read. */
+  function describeSheetHead(matrix) {
+    for (var r = 0; r < Math.min(matrix.length, 15); r++) {
+      var labels = (matrix[r] || []).map(txt).filter(function (v) { return v !== ""; });
+      if (labels.length >= 2) {
+        var line = labels.join(" | ").replace(/\s+/g, " ");
+        return line.length > 140 ? line.slice(0, 137) + "…" : line;
+      }
+    }
+    return "";
+  }
+
+  // "Emp No.", "Employee Number", "Person Number" — the label an employee roster
+  // uses for its identifying column.
+  var EMP_NUMBER_LABEL = /\b(emp|employee|person|staff)\.?\s*(no|num|number|id)\b/;
+
+  function findHeaderRowMatching(matrix, pattern) {
+    for (var i = 0; i < matrix.length; i++) {
+      var row = matrix[i] || [];
+      for (var c = 0; c < row.length; c++) {
+        if (pattern.test(txt(row[c]).replace(/\s+/g, " ").toLowerCase())) return i;
+      }
+    }
+    return -1;
   }
 
   function findHeaderRow(matrix, marker) {
@@ -2107,25 +2146,39 @@
 
   function parseActive(matrix) {
     var header = findHeaderRow(matrix, "old emp no");
+    if (header < 0) header = findHeaderRowMatching(matrix, EMP_NUMBER_LABEL);
     if (header < 0) return [];
 
     var cols = headerCols(matrix[header]);
     var labels = Object.keys(cols);
-    var cOld = cols["old emp no."] !== undefined ? cols["old emp no."]
-      : cols["old emp no"] !== undefined ? cols["old emp no"] : 0;
 
-    var newLabel = labels.filter(function (l) { return l.indexOf("emp no") === 0; })[0];
-    var cNew = newLabel === undefined ? 1 : cols[newLabel];
+    function firstLabel(test) {
+      var hit = labels.filter(test)[0];
+      return hit === undefined ? -1 : cols[hit];
+    }
 
-    var nameLabel = labels.filter(function (l) { return l.indexOf("name") >= 0; })[0];
-    var cName = nameLabel === undefined ? 2 : cols[nameLabel];
+    // The old number is optional: an export with nothing to bridge simply
+    // carries the current number and the name.
+    var cOld = firstLabel(function (l) { return l.indexOf("old") === 0 && EMP_NUMBER_LABEL.test(l); });
+    var cNew = firstLabel(function (l) {
+      return l.indexOf("old") !== 0 && EMP_NUMBER_LABEL.test(l);
+    });
+    if (cNew < 0) cNew = cOld >= 0 ? -1 : 1;
+    if (cNew < 0) return [];
+
+    var cName = firstLabel(function (l) { return l.indexOf("name") >= 0; });
+    if (cName < 0) cName = 2;
 
     var out = [];
     for (var i = header + 1; i < matrix.length; i++) {
       var r = matrix[i] || [];
       var newNo = stripZeros(r[cNew]);
       if (!newNo) continue;
-      out.push({ oldNo: stripZeros(r[cOld]), newNo: newNo, name: txt(r[cName]) });
+      out.push({
+        oldNo: cOld >= 0 ? stripZeros(r[cOld]) : "",
+        newNo: newNo,
+        name: txt(r[cName])
+      });
     }
     return out;
   }
@@ -3216,11 +3269,44 @@
         body.appendChild(el("div", "title", meta.label));
         body.appendChild(el("div", "detail", loaded ? loaded.name : meta.source));
         if (!loaded && meta.required) body.appendChild(el("div", "req", "required"));
+
+        // Detection covers the exports seen so far; this is the way out when a
+        // new variant of one of them is not recognised.
+        var pick = el("button", "pick", loaded ? "replace" : "choose this file");
+        pick.type = "button";
+        var slotInput = el("input");
+        slotInput.type = "file";
+        slotInput.accept = ".xlsx,.xls,.xlsm,.xlsb";
+        pick.addEventListener("click", function () { slotInput.click(); });
+        slotInput.addEventListener("change", function () {
+          var file = slotInput.files[0];
+          slotInput.value = "";
+          if (file) assignFile(file, meta.kind);
+        });
+        body.appendChild(pick);
+        body.appendChild(slotInput);
+
         slot.appendChild(body);
         slotsBox.appendChild(slot);
       });
 
       generateBtn.disabled = !(state.slots.tas && state.slots.active);
+    }
+
+    /** Puts a file into a named slot, skipping detection entirely. */
+    function assignFile(file, kind) {
+      clearError();
+      state.result = null;
+      renderReport();
+      renderPreview();
+      downloadBtn.disabled = true;
+
+      readRawMatrix(file).then(function (matrix) {
+        state.slots[kind] = { name: file.name, matrix: matrix, size: file.size };
+        renderSlots();
+      }).catch(function (error) {
+        showError(file.name + ": " + (error.message || "could not be read"));
+      });
     }
 
     function renderPreview() {
@@ -3353,7 +3439,10 @@
         return readRawMatrix(file).then(function (matrix) {
           var kind = detectReportKind(matrix);
           if (!kind) {
-            problems.push(file.name + ": not recognised as TAS / Car Gate / Leaves / Active list");
+            var head = describeSheetHead(matrix);
+            problems.push(file.name + ": not recognised as TAS / Car Gate / Leaves / Active list" +
+              (head ? " — its first heading row reads: " + head : " — no heading row was found") +
+              ". Use “choose this file” on the right card to assign it by hand.");
             return;
           }
           state.slots[kind] = { name: file.name, matrix: matrix, size: file.size };
