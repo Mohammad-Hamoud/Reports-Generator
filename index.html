@@ -340,9 +340,37 @@
     return value.toLocaleString(undefined, { maximumFractionDigits: digits === undefined ? 4 : digits });
   }
 
+  /**
+   * Every date in this app is midnight UTC, and every reader of one uses the UTC
+   * getters. ExcelJS turns a Date into an Excel serial through UTC, so a date
+   * built at local midnight east of Greenwich lands before midnight UTC and
+   * Excel then shows the day before. SheetJS hands dates back at midnight UTC
+   * too, so this is also what the incoming values already are.
+   */
+  function utcDay(date) {
+    return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+  }
+
+  /**
+   * Excel stores a date as a count of days since 1900. Converting it here rather
+   * than letting the reader do it is what makes the result timezone-proof:
+   * SheetJS builds those dates in local time and even applies historic offsets,
+   * so the same cell comes back as a different day in different places.
+   */
+  function excelSerialToDate(serial) {
+    var days = Math.floor(serial);
+    var ms = Math.round((serial - days) * 86400000);
+    // 1900 is not a leap year, but Excel's serials say it is
+    return new Date(Date.UTC(1899, 11, 31) + (days > 60 ? days - 1 : days) * 86400000 + ms);
+  }
+
+  function isDateSerial(value) {
+    return typeof value === "number" && isFinite(value) && value > 1000 && value < 2958466;
+  }
+
   function formatDate(date) {
     var months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    return ("0" + date.getDate()).slice(-2) + "-" + months[date.getMonth()] + "-" + date.getFullYear();
+    return ("0" + date.getUTCDate()).slice(-2) + "-" + months[date.getUTCMonth()] + "-" + date.getUTCFullYear();
   }
 
   function formatCell(value) {
@@ -373,7 +401,7 @@
   }
 
   function daysInMonth(date) {
-    return new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
+    return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0)).getUTCDate();
   }
 
   /** A titled, scrollable table for the exception and audit lists. */
@@ -555,18 +583,37 @@
     };
   }
 
+  // Turns the date-formatted numbers into Dates built here, at the UTC instant the
+  // serial names. Reading with cellDates would hand back a different day per
+  // timezone, which is how a whole report ends up a day early.
+  function materialiseDates(sheet) {
+    if (!sheet["!ref"] || !XLSX.SSF || typeof XLSX.SSF.is_date !== "function") return;
+    var range = XLSX.utils.decode_range(sheet["!ref"]);
+
+    for (var r = range.s.r; r <= range.e.r; r++) {
+      for (var c = range.s.c; c <= range.e.c; c++) {
+        var cell = sheet[XLSX.utils.encode_cell({ r: r, c: c })];
+        if (!cell || cell.t !== "n" || typeof cell.v !== "number" || cell.v < 1) continue;
+        if (!XLSX.SSF.is_date(cell.z || "")) continue;
+        cell.t = "d";
+        cell.v = excelSerialToDate(cell.v);
+      }
+    }
+  }
+
   function readWorkbook(file) {
     return new Promise(function (resolve, reject) {
       var reader = new FileReader();
       reader.onerror = function () { reject(new Error("Could not read the file.")); };
       reader.onload = function (event) {
         try {
-          var workbook = XLSX.read(new Uint8Array(event.target.result), { type: "array", cellDates: true });
+          var workbook = XLSX.read(new Uint8Array(event.target.result), { type: "array", cellNF: true });
           var sheetName = workbook.SheetNames[0];
           if (!sheetName) throw new Error("This workbook has no sheets.");
 
           var sheet = workbook.Sheets[sheetName];
           fillVerticalMerges(sheet);
+          materialiseDates(sheet);
 
           var matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "", blankrows: true, raw: true });
           if (!matrix.length) throw new Error("The first sheet (“" + sheetName + "”) is empty.");
@@ -589,7 +636,8 @@
    * ------------------------------------------------------------------ */
 
   function parseDateValue(value, dayFirst) {
-    if (value instanceof Date) return value;
+    if (value instanceof Date) return isNaN(value.getTime()) ? null : utcDay(value);
+    if (isDateSerial(value)) return utcDay(excelSerialToDate(value));
     if (typeof value !== "string") return null;
 
     var parts = value.trim().match(/^(\d{1,4})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/);
@@ -603,7 +651,7 @@
     var month = dayFirst ? b : a;
     if (month < 1 || month > 12 || day < 1 || day > 31) return null;
 
-    var date = new Date(year, month - 1, day);
+    var date = new Date(Date.UTC(year, month - 1, day));
     return isNaN(date.getTime()) ? null : date;
   }
 
@@ -622,8 +670,10 @@
   function parseHoursValue(value) {
     if (isNumeric(value)) return value;
 
+    // An Excel time cell arrives as a Date on 1899-12-30 at midnight UTC plus the
+    // time, so the UTC getters are the ones that hold the clock reading.
     if (value instanceof Date) {
-      return value.getHours() + value.getMinutes() / 60 + value.getSeconds() / 3600;
+      return value.getUTCHours() + value.getUTCMinutes() / 60 + value.getUTCSeconds() / 3600;
     }
 
     if (typeof value === "string") {
@@ -1883,22 +1933,15 @@
     return String(value).trim();
   }
 
-  // Excel keeps dates as a serial day count. Converting through UTC keeps the
-  // calendar day stable regardless of the viewer's timezone.
   function serialParts(serial) {
     var days = Math.floor(serial);
-    var minutes = Math.round((serial - days) * 1440) % 1440;
-    var date = new Date(Date.UTC(1899, 11, 31) + (days > 60 ? days - 1 : days) * 86400000);
+    var date = excelSerialToDate(days);
     return {
       year: date.getUTCFullYear(),
       month: date.getUTCMonth() + 1,
       day: date.getUTCDate(),
-      minutes: minutes
+      minutes: Math.round((serial - days) * 1440) % 1440
     };
-  }
-
-  function isDateSerial(value) {
-    return typeof value === "number" && isFinite(value) && value > 1000 && value < 2958466;
   }
 
   function pad2(number) { return ("0" + number).slice(-2); }
