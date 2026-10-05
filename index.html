@@ -667,6 +667,53 @@
     return false;
   }
 
+  /**
+   * TAS writes durations as H.MM — "11.45" is 11 hours 45 minutes, not 11.45
+   * hours — and the shortage column agrees (12.00 − 11.45 = 0.15, a quarter of
+   * an hour). The giveaway is that no fraction ever reaches .60, so a column
+   * holding one tells the two conventions apart by itself.
+   */
+  function detectHoursFormat(rows, index) {
+    if (index < 0) return "decimal";
+    var seen = 0;
+
+    for (var r = 0; r < rows.length; r++) {
+      var value = rows[r][index];
+      if (!isNumeric(value)) continue;
+      var fraction = Math.round((Math.abs(value) - Math.floor(Math.abs(value))) * 100);
+      if (fraction === 0) continue;
+      seen++;
+      if (fraction > 59) return "decimal";
+    }
+    return seen >= 5 ? "hmm" : "decimal";
+  }
+
+  /** "11.45" in H.MM is 11.75 hours. */
+  function hoursFromHmm(value) {
+    if (!isNumeric(value)) return value;
+    var whole = Math.floor(value);
+    return whole + Math.round((value - whole) * 100) / 60;
+  }
+
+  /** "00:40" / "0:40:00" / 40 → minutes late. */
+  function parseLateMinutes(value) {
+    if (isBlank(value)) return 0;
+
+    if (value instanceof Date) return value.getUTCHours() * 60 + value.getUTCMinutes();
+    if (isNumeric(value)) {
+      // a time-formatted cell is a fraction of a day; anything else is H.MM
+      if (value > 0 && value < 1) return Math.round(value * 1440);
+      var whole = Math.floor(value);
+      return whole * 60 + Math.round((value - whole) * 100);
+    }
+
+    var clock = String(value).trim().match(/^(\d{1,3}):([0-5]\d)(?::([0-5]\d))?$/);
+    if (clock) return parseInt(clock[1], 10) * 60 + parseInt(clock[2], 10);
+
+    var number = parseFloat(String(value).replace(/,/g, ""));
+    return isFinite(number) ? Math.round(number) : 0;
+  }
+
   function parseHoursValue(value) {
     if (isNumeric(value)) return value;
 
@@ -726,6 +773,10 @@
     return findColumn(headers, [/^status$/i, /attendance\s*status/i, /\bstatus\b/i, /day\s*type/i]);
   }
 
+  function detectLateColumn(headers) {
+    return findColumn(headers, [/late\s*coming/i, /^late$/i, /late\s*(min|hours|time)/i, /tardy/i]);
+  }
+
   function detectHoursColumn(headers) {
     return findColumn(headers, [
       /total\s*hours/i,
@@ -743,6 +794,9 @@
   var PAYROLL_COLUMNS = [
     { key: "costCenter", title: "Cost Center",           role: INPUT, format: null },
     { key: "required",   title: "Required Hours / Day",  role: CALC,  format: "0.00" },
+    { key: "lateMin",    title: "Late Minutes",          role: CALC,  format: "0" },
+    { key: "lateGrace",  title: "Late Grace (min)",      role: CALC,  format: "0" },
+    { key: "paidHours",  title: "Paid Hours",            role: CALC,  format: "0.00" },
     { key: "pct",        title: "Hours Completion %",    role: CALC,  format: "0.0%" },
     { key: "monthly",    title: "Monthly Salary",        role: INPUT, format: "#,##0.00" },
     { key: "days",       title: "Days in Month",         role: CALC,  format: "0" },
@@ -763,6 +817,9 @@
   var OT_MULTIPLIER = 1.5;
   // Overtime is always valued against a 30-day month, whatever the calendar says.
   var OT_MONTH_DAYS = 30;
+  // Arrive this many minutes late or less and the day is paid in full; go over
+  // and every late minute counts, not just the ones past the grace.
+  var DEFAULT_LATE_GRACE_MINUTES = 15;
   var DEFAULT_DAY_OFF_WORDS = "off, holiday";
 
   // Timesheets spell the non-working day in many ways ("Weekly Off", "Day Off",
@@ -787,6 +844,24 @@
    * attendance sheets so both always carry identical rules. Each takes a map of
    * column letters, the row number, and returns an expression — never a whole
    * formula — so the caller controls the surrounding guard. */
+
+  /**
+   * Worked hours, converted out of H.MM when that is the convention, plus the
+   * late minutes the grace forgives. Going one minute past the grace forfeits
+   * the whole allowance, which is the rule as asked for.
+   */
+  function paidHoursExpression(L, row, hoursLetter, hoursFormat) {
+    if (!hoursLetter) return "\"\"";
+    var cell = hoursLetter + row;
+    var worked = hoursFormat === "hmm"
+      ? "INT(" + cell + ")+ROUND((" + cell + "-INT(" + cell + "))*100,0)/60"
+      : cell;
+    var excused = L.lateMin && L.lateGrace
+      ? "IF(AND(" + L.lateMin + row + ">0," + L.lateMin + row + "<=" + L.lateGrace + row + ")," +
+        L.lateMin + row + ",0)/60"
+      : "0";
+    return "IF(ISNUMBER(" + cell + ")," + worked + ",0)+" + excused;
+  }
 
   function paymentExpression(L, row, hasDayOff) {
     var capped = L.daily + row + "*MIN(" + L.pct + row + ",1)";
@@ -830,7 +905,10 @@
     var dateIndex = mapping.dateIndex;
     var hoursIndex = mapping.hoursIndex;
     var statusIndex = mapping.statusIndex;
+    var lateIndex = mapping.lateIndex;
     var required = mapping.requiredHours;
+    var lateGrace = mapping.lateGrace;
+    var hoursFormat = mapping.hoursFormat;
     var dayOffWords = parseKeywords(mapping.dayOffWords);
 
     var datesParsed = 0, hoursConverted = 0;
@@ -854,16 +932,26 @@
 
     // Values we can already compute, shown in the preview and used for stats.
     var computed = rows.map(function (row) {
-      var hours = hoursIndex >= 0 && isNumeric(row[hoursIndex]) ? row[hoursIndex] : 0;
+      var raw = hoursIndex >= 0 && isNumeric(row[hoursIndex]) ? row[hoursIndex] : 0;
+      var hours = hoursFormat === "hmm" ? hoursFromHmm(raw) : raw;
       var date = dateIndex >= 0 && row[dateIndex] instanceof Date ? row[dateIndex] : null;
       var dayOff = statusIndex >= 0 && isDayOff(row[statusIndex], dayOffWords);
-      var pct = required > 0 ? hours / required : null;
+
+      // Within the grace the late minutes are handed back, so the day pays as if
+      // they had been worked. Past it nothing is excused — every minute counts.
+      var lateMinutes = lateIndex >= 0 ? parseLateMinutes(row[lateIndex]) : 0;
+      var excused = lateMinutes > 0 && lateMinutes <= lateGrace ? lateMinutes : 0;
+      var paidHours = hours + excused / 60;
+      var pct = required > 0 ? paidHours / required : null;
 
       return {
         pct: pct,
         cappedPct: pct === null ? null : Math.min(pct, 1),
         days: date ? daysInMonth(date) : null,
         hours: hours,
+        paidHours: paidHours,
+        lateMinutes: lateMinutes,
+        excused: excused,
         date: date,
         dayOff: dayOff,
         // Hours are capped at the daily requirement before the OT multiplier.
@@ -878,7 +966,10 @@
       dateIndex: dateIndex,
       hoursIndex: hoursIndex,
       statusIndex: statusIndex,
+      lateIndex: lateIndex,
       requiredHours: required,
+      lateGrace: lateGrace,
+      hoursFormat: hoursFormat,
       dayOffWords: dayOffWords,
       datesParsed: datesParsed,
       hoursConverted: hoursConverted,
@@ -1035,7 +1126,7 @@
       // ISNUMBER guards rather than N(): N() silently returns 0 for anything
       // textual, including a number that was typed as text.
       var pct = hoursLetter
-        ? { formula: "IF(" + letters.required + r + "=0,\"\",IF(ISNUMBER(" + hoursLetter + r + ")," + hoursLetter + r + "/" + letters.required + r + ",0))" }
+        ? { formula: "IF(" + letters.required + r + "=0,\"\"," + letters.paidHours + r + "/" + letters.required + r + ")" }
         : null;
 
       var days = dateLetter
@@ -1057,6 +1148,11 @@
       var values = {
         costCenter: null,               // filled in by the user
         required: model.requiredHours,
+        lateMin: model.computed[index].lateMinutes,
+        lateGrace: model.lateGrace,
+        paidHours: hoursLetter
+          ? { formula: paidHoursExpression(letters, r, hoursLetter, model.hoursFormat) }
+          : null,
         pct: pct,
         monthly: null,                  // filled in by the user
         days: days,
@@ -1195,6 +1291,12 @@
 
     sheet.addRow([]);
     section("Rules applied");
+    line("Hours format", model.hoursFormat === "hmm"
+      ? "Total Hours read as H.MM — 11.45 is 11h45m, so Paid Hours shows 11.75."
+      : "Total Hours read as a decimal number of hours.");
+    line("Late grace", model.lateGrace + " minutes. At or under it the late minutes are paid; " +
+      "over it every late minute of that day counts.");
+    line("Paid Hours", "Worked hours plus the late minutes the grace forgives.");
     line("Payment cap", "Payment for Day never exceeds Daily Salary.");
     line("Day off pay", "A day off pays the full Daily Salary, worked or not.");
     line("Excess Above Cap", "Daily Salary x (Completion % - 100%), when over 100%. Zero on a day off.");
@@ -1236,6 +1338,9 @@
     { key: "status",     patterns: [/^status$/i] },
     { key: "hours",      patterns: [/^total\s*hours$/i, /total\s*hours/i] },
     { key: "required",   patterns: [/required\s*hours/i] },
+    { key: "lateMin",    patterns: [/late\s*minutes/i] },
+    { key: "lateGrace",  patterns: [/late\s*grace/i] },
+    { key: "paidHours",  patterns: [/paid\s*hours/i] },
     { key: "pct",        patterns: [/completion/i] },
     { key: "monthly",    patterns: [/monthly\s*salary/i] },
     { key: "days",       patterns: [/days\s*in\s*month/i] },
@@ -1255,12 +1360,14 @@
 
   /** Columns rebuilt as formulas on the supplier sheets, so edits stay live. */
   var RECALCULATED_KEYS = {
-    pct: 1, days: 1, daily: 1, payment: 1, excess: 1, dayOff: 1, otHours: 1, otPay: 1, net: 1
+    paidHours: 1, pct: 1, days: 1, daily: 1, payment: 1, excess: 1,
+    dayOff: 1, otHours: 1, otPay: 1, net: 1
   };
 
   var SUMMARY_FORMATS = {
     date: "dd-mmm-yyyy", hours: "0.00", required: "0.00", pct: "0.0%",
     monthly: "#,##0.00", days: "0", daily: "#,##0.00", payment: "#,##0.00",
+    lateMin: "0", lateGrace: "0", paidHours: "0.00",
     excess: "#,##0.00", otHours: "0.00", manualOt: "0.00", otValue: "#,##0.00", otPay: "#,##0.00",
     incentive: "#,##0.00", deduction: "#,##0.00", net: "#,##0.00"
   };
@@ -1350,6 +1457,7 @@
         missing.join(" and ") + " column was found.");
     }
 
+    var hoursFormat = detectHoursFormat(cleaned.rows, cols.hours === undefined ? -1 : cols.hours);
     var employees = {}, order = [];
     var suppliers = {}, supplierOrder = [];
     var dates = [];
@@ -1370,15 +1478,24 @@
       var date = cols.date !== undefined && row[cols.date] instanceof Date ? row[cols.date] : null;
       if (date) dates.push(date.getTime());
 
-      var hours = numberAt(row, cols.hours) || 0;
+      var rawHours = numberAt(row, cols.hours) || 0;
+      var hours = hoursFormat === "hmm" ? hoursFromHmm(rawHours) : rawHours;
       var required = numberAt(row, cols.required);
       if (required === null) required = DEFAULT_REQUIRED_HOURS;
+
+      // Paid Hours is a formula in the uploaded report and carries no cached
+      // result, so it is rebuilt here from the values it was derived from.
+      var lateMinutes = numberAt(row, cols.lateMin) || 0;
+      var grace = numberAt(row, cols.lateGrace);
+      if (grace === null) grace = DEFAULT_LATE_GRACE_MINUTES;
+      var excused = lateMinutes > 0 && lateMinutes <= grace ? lateMinutes : 0;
+      var paidHours = hours + excused / 60;
       var monthly = numberAt(row, cols.monthly);
       if (monthly === null) monthlyMissing++;
 
       var days = date ? daysInMonth(date) : numberAt(row, cols.days);
       var daily = monthly !== null && days ? monthly / days : null;
-      var pct = required > 0 ? hours / required : null;
+      var pct = required > 0 ? paidHours / required : null;
 
       // Trust a literal Yes/No if the report carries one; otherwise re-derive.
       var dayOffCell = textAt(row, cols.dayOff);
@@ -1410,7 +1527,7 @@
           department: textAt(row, cols.department), company: textAt(row, cols.company),
           supplier: supplier, costCenters: {}, rows: [],
           records: 0, present: 0, absent: 0, dayOffWorked: 0,
-          hours: 0, pctSum: 0, pctCount: 0, required: required, monthly: monthly, daily: daily,
+          hours: 0, lateMin: 0, pctSum: 0, pctCount: 0, required: required, monthly: monthly, daily: daily,
           payment: 0, excess: 0, otHours: 0, otPay: 0, incentive: 0, deduction: 0, net: 0
         };
         order.push(codeKey);
@@ -1429,7 +1546,8 @@
       if (/^present$/i.test(status)) employee.present++;
       if (/^absent$/i.test(status)) employee.absent++;
       if (dayOff && hours > 0) employee.dayOffWorked++;
-      employee.hours += hours;
+      employee.hours += paidHours;
+      employee.lateMin += lateMinutes;
       if (pct !== null) { employee.pctSum += pct; employee.pctCount++; }
       if (employee.monthly === null && monthly !== null) { employee.monthly = monthly; employee.daily = daily; }
       employee.payment += payment;
@@ -1505,14 +1623,15 @@
       firstDay: dates.length ? new Date(dates[0]) : null,
       lastDay: dates.length ? new Date(dates[dates.length - 1]) : null,
       monthlyMissing: monthlyMissing,
+      hoursFormat: hoursFormat,
       mergedCodes: mergedCodes,
       mergedPairs: mergedPairs,
       totals: employeeList.reduce(function (all, e) {
-        all.hours += e.hours; all.payment += e.payment; all.excess += e.excess;
+        all.hours += e.hours; all.lateMin += e.lateMin; all.payment += e.payment; all.excess += e.excess;
         all.otHours += e.otHours; all.otPay += e.otPay; all.incentive += e.incentive;
         all.deduction += e.deduction; all.net += e.net; all.records += e.records;
         return all;
-      }, { hours: 0, payment: 0, excess: 0, otHours: 0, otPay: 0, incentive: 0, deduction: 0, net: 0, records: 0 })
+      }, { hours: 0, lateMin: 0, payment: 0, excess: 0, otHours: 0, otPay: 0, incentive: 0, deduction: 0, net: 0, records: 0 })
     };
   }
 
@@ -1528,7 +1647,8 @@
     { title: "Days Present",          key: "present",    role: CALC, format: "0" },
     { title: "Days Absent",           key: "absent",     role: CALC, format: "0" },
     { title: "Day-off Shifts Worked", key: "dayOffWorked", role: CALC, format: "0" },
-    { title: "Total Actual Hours",    key: "hours",      role: CALC, format: "0.00" },
+    { title: "Total Paid Hours",      key: "hours",      role: CALC, format: "0.00" },
+    { title: "Total Late Minutes",    key: "lateMin",    role: CALC, format: "0" },
     { title: "Required Hours / Day",  key: "required",   role: CALC, format: "0.00" },
     { title: "Avg Completion %",      key: "averagePct", role: CALC, format: "0.0%" },
     { title: "Monthly Salary",        key: "monthly",    role: CALC, format: "#,##0.00" },
@@ -1577,9 +1697,16 @@
     function attendanceFormula(key, r) {
       var L = letterOf;
       switch (key) {
+        case "paidHours":
+          if (!L.hours) return undefined;
+          return paidHoursExpression(L, r, L.hours, summary.hoursFormat);
         case "pct":
-          if (!L.hours || !L.required) return undefined;
-          return "IF(" + L.required + r + "=0,\"\",IF(ISNUMBER(" + L.hours + r + ")," + L.hours + r + "/" + L.required + r + ",0))";
+          if (!L.required) return undefined;
+          if (!L.paidHours) {
+            if (!L.hours) return undefined;
+            return "IF(" + L.required + r + "=0,\"\",IF(ISNUMBER(" + L.hours + r + ")," + L.hours + r + "/" + L.required + r + ",0))";
+          }
+          return "IF(" + L.required + r + "=0,\"\"," + L.paidHours + r + "/" + L.required + r + ")";
         case "days":
           if (!L.date) return undefined;
           return "IF(ISNUMBER(" + L.date + r + "),DAY(EOMONTH(" + L.date + r + ",0)),\"\")";
@@ -1791,7 +1918,8 @@
           ? countifs("," + range(group.attSheet, "dayOff", group.lastRow) + ",\"Yes\"," +
               range(group.attSheet, "hours", group.lastRow) + ",\">0\"")
           : null,
-        hours: sumifs("hours"),
+        hours: sumifs(letterOf.paidHours ? "paidHours" : "hours"),
+        lateMin: letterOf.lateMin ? sumifs("lateMin") : null,
         required: averageifs("required"),
         averagePct: averageifs("pct"),
         monthly: averageifs("monthly"),
@@ -1813,7 +1941,7 @@
       if (column.key === "code") return "TOTAL";
       if (column.key === "name") return summary.employees.length + " employees";
       var TOTALLED = {
-        records: 1, present: 1, absent: 1, dayOffWorked: 1, hours: 1,
+        records: 1, present: 1, absent: 1, dayOffWorked: 1, hours: 1, lateMin: 1,
         payment: 1, excess: 1, otHours: 1, otPay: 1, incentive: 1, deduction: 1, net: 1
       };
       if (!TOTALLED[column.key] || summaryLast < 2) return null;
@@ -3651,7 +3779,7 @@
 
     /* ---- mapping (casuals only) ---- */
     var mappingCard, dateSelect, hoursSelect, statusSelect, requiredInput, dayOffInput,
-        cleanupNotes, mappingAlert, statusPreview;
+        lateSelect, graceInput, hoursFormatSelect, cleanupNotes, mappingAlert, statusPreview;
 
     if (tab.mode === "casuals") {
       mappingCard = el("div", "card");
@@ -3691,6 +3819,28 @@
       requiredInput.value = String(DEFAULT_REQUIRED_HOURS);
       field("Required hours per day", requiredInput);
 
+      lateSelect = el("select");
+      lateSelect.id = "late-" + tab.id;
+      field("Late coming column", lateSelect);
+
+      graceInput = el("input");
+      graceInput.id = "grace-" + tab.id;
+      graceInput.type = "number";
+      graceInput.min = "0";
+      graceInput.step = "1";
+      graceInput.value = String(DEFAULT_LATE_GRACE_MINUTES);
+      field("Late grace (minutes)", graceInput);
+
+      hoursFormatSelect = el("select");
+      hoursFormatSelect.id = "hfmt-" + tab.id;
+      [["hmm", "H.MM — 11.45 means 11h45m"], ["decimal", "Decimal — 11.45 means 11h27m"]]
+        .forEach(function (pair) {
+          var option = el("option", null, pair[1]);
+          option.value = pair[0];
+          hoursFormatSelect.appendChild(option);
+        });
+      field("Hours format", hoursFormatSelect);
+
       dayOffInput = el("input");
       dayOffInput.id = "dayoff-" + tab.id;
       dayOffInput.type = "text";
@@ -3712,6 +3862,9 @@
 
       statusSelect.addEventListener("change", function () { renderStatusPreview(); });
       dayOffInput.addEventListener("input", function () { renderStatusPreview(); });
+      [lateSelect, graceInput, hoursFormatSelect, hoursSelect].forEach(function (control) {
+        control.addEventListener("change", function () { if (state.cleaned) renderMapping(); });
+      });
     }
 
     /* ---- preview ---- */
@@ -3817,6 +3970,9 @@
         var preview = {
           costCenter: "",
           required: model.requiredHours,
+          lateMin: info.lateMinutes,
+          lateGrace: model.lateGrace,
+          paidHours: info.paidHours,
           pct: info.pct,
           monthly: "",
           days: info.days,
@@ -4012,10 +4168,13 @@
       var dateIndex = detectDateColumn(cleaned.headers, cleaned.rows);
       var hoursIndex = detectHoursColumn(cleaned.headers);
       var statusIndex = detectStatusColumn(cleaned.headers);
+      var lateIndex = detectLateColumn(cleaned.headers);
 
       fillSelect(dateSelect, cleaned.headers, dateIndex, true);
       fillSelect(hoursSelect, cleaned.headers, hoursIndex, true);
       fillSelect(statusSelect, cleaned.headers, statusIndex, true);
+      fillSelect(lateSelect, cleaned.headers, lateIndex, true);
+      hoursFormatSelect.value = detectHoursFormat(cleaned.rows, hoursIndex);
 
       cleanupNotes.innerHTML = "";
       var notes = [];
@@ -4031,6 +4190,33 @@
       notes.forEach(function (note) { cleanupNotes.appendChild(el("li", null, note)); });
 
       renderStatusPreview();
+
+      if (hoursIndex >= 0) {
+        var sample = [];
+        for (var hr = 0; hr < cleaned.rows.length && sample.length < 3; hr++) {
+          var hv = cleaned.rows[hr][hoursIndex];
+          if (isNumeric(hv) && hv !== Math.floor(hv)) sample.push(hv);
+        }
+        var asHmm = hoursFormatSelect.value === "hmm";
+        cleanupNotes.appendChild(el("li", null,
+          "Hours read as " + (asHmm ? "H.MM" : "decimal") +
+          (sample.length ? " — " + sample.map(function (v) {
+            var h = asHmm ? hoursFromHmm(v) : v;
+            return v + " = " + Math.floor(h) + "h" + pad2(Math.round((h - Math.floor(h)) * 60)) + "m";
+          }).join(", ") : "") + ". Change it above if that is wrong."));
+      }
+
+      if (lateIndex >= 0) {
+        var over = 0, within = 0;
+        cleaned.rows.forEach(function (row) {
+          var minutes = parseLateMinutes(row[lateIndex]);
+          if (minutes <= 0) return;
+          if (minutes <= (parseFloat(graceInput.value) || 0)) within++; else over++;
+        });
+        cleanupNotes.appendChild(el("li", null,
+          "Late arrivals: " + within.toLocaleString() + " inside the grace (paid in full), " +
+          over.toLocaleString() + " over it (every late minute counts)."));
+      }
 
       var warnings = [];
       if (dateIndex < 0) warnings.push("no date column");
@@ -4053,7 +4239,10 @@
         dateIndex: parseInt(dateSelect.value, 10),
         hoursIndex: parseInt(hoursSelect.value, 10),
         statusIndex: parseInt(statusSelect.value, 10),
+        lateIndex: parseInt(lateSelect.value, 10),
         requiredHours: parseFloat(requiredInput.value) || 0,
+        lateGrace: Math.max(0, parseFloat(graceInput.value) || 0),
+        hoursFormat: hoursFormatSelect.value,
         dayOffWords: dayOffInput.value
       };
     }

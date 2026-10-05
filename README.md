@@ -48,7 +48,10 @@ editable controls before the report is generated.
 | --- | --- | --- |
 | Cost Center | **you fill in** | Left empty for manual entry |
 | Required Hours / Day | calculated | The daily target, `12` by default |
-| Hours Completion % | formula | `actual hours ÷ required hours`, uncapped so you can see overtime days |
+| Late Minutes | calculated | Lateness read from the Late Coming column, in minutes |
+| Late Grace (min) | calculated | The allowance, `15` by default |
+| Paid Hours | formula | Worked hours plus the late minutes the grace forgives |
+| Hours Completion % | formula | `Paid Hours ÷ Required Hours`, uncapped so you can see overtime days |
 | Monthly Salary | **you fill in** | Left empty on purpose |
 | Days in Month | formula | `DAY(EOMONTH(date,0))` → 28/29/30/31 |
 | Daily Salary | formula | `Monthly Salary ÷ Days in Month` |
@@ -74,6 +77,25 @@ there and `Excess Above Cap` stays 0.
 
 The `Cost Center` column is skipped when the uploaded sheet already has a cost
 centre/center column of its own, so no duplicate is added.
+
+### Lateness
+
+A late arrival of **15 minutes or less is paid in full** — those minutes are handed back
+and the day pays as if they had been worked. Go one minute over and nothing is excused:
+every late minute of that day counts against the completion. The allowance is editable in
+the mapping card.
+
+`Late Minutes` reads the Late Coming column, which arrives as `00:40` style text, an
+Excel time cell or a plain number. The grace applies to lateness only — leaving early is
+never excused.
+
+### Hours format
+
+TAS writes durations as **H.MM**: `11.45` is 11 hours 45 minutes, not 11.45 hours. The
+shortage column agrees — `12.00 − 11.45 = 0.15`, a quarter of an hour. Since no fraction
+ever reaches `.60`, the convention is detected from the column itself and shown in the
+mapping card, where it can be overridden. `Paid Hours` is the converted decimal value, so
+it is the column to sum.
 
 ### Overtime
 
