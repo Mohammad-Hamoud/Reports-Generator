@@ -777,6 +777,31 @@
     return findColumn(headers, [/late\s*coming/i, /^late$/i, /late\s*(min|hours|time)/i, /tardy/i]);
   }
 
+  /** "07:00" / an Excel time cell / minutes → minutes of the day. */
+  function clockMinutes(value) {
+    if (isBlank(value)) return null;
+    if (value instanceof Date) return value.getUTCHours() * 60 + value.getUTCMinutes();
+    if (isNumeric(value)) return value > 0 && value < 1 ? Math.round(value * 1440) : null;
+
+    var clock = String(value).trim().match(/^(\d{1,2}):([0-5]\d)(?::([0-5]\d))?$/);
+    return clock ? parseInt(clock[1], 10) * 60 + parseInt(clock[2], 10) : null;
+  }
+
+  /**
+   * Minutes worked before the shift was due to start. They are not owed, so they
+   * must not quietly offset an early departure later the same day — turning up
+   * early neither earns nor costs anything.
+   */
+  function earlyArrivalMinutes(scheduledIn, timeIn) {
+    var start = clockMinutes(scheduledIn);
+    var arrived = clockMinutes(timeIn);
+    if (start === null || arrived === null) return 0;
+
+    var early = start - arrived;
+    // a bigger gap than half a day means the clock wrapped, not an early arrival
+    return early > 0 && early < 720 ? early : 0;
+  }
+
   function detectHoursColumn(headers) {
     return findColumn(headers, [
       /total\s*hours/i,
@@ -795,6 +820,7 @@
     { key: "costCenter", title: "Cost Center",           role: INPUT, format: null },
     { key: "required",   title: "Required Hours / Day",  role: CALC,  format: "0.00" },
     { key: "lateMin",    title: "Late Minutes",          role: CALC,  format: "0" },
+    { key: "earlyIn",    title: "Early Arrival (min)",   role: CALC,  format: "0" },
     { key: "lateGrace",  title: "Late Grace (min)",      role: CALC,  format: "0" },
     { key: "paidHours",  title: "Paid Hours",            role: CALC,  format: "0.00" },
     { key: "pct",        title: "Hours Completion %",    role: CALC,  format: "0.0%" },
@@ -850,6 +876,13 @@
    * late minutes the grace forgives. Going one minute past the grace forfeits
    * the whole allowance, which is the rule as asked for.
    */
+  /**
+   * Worked hours, converted out of H.MM when that is the convention, minus the
+   * minutes clocked before the shift was due to start, plus the late minutes the
+   * grace forgives. Going one minute past the grace forfeits the whole
+   * allowance, which is the rule as asked for. Dropping the early arrival is
+   * what stops it paying for an early departure later the same day.
+   */
   function paidHoursExpression(L, row, hoursLetter, hoursFormat) {
     if (!hoursLetter) return "\"\"";
     var cell = hoursLetter + row;
@@ -860,7 +893,8 @@
       ? "IF(AND(" + L.lateMin + row + ">0," + L.lateMin + row + "<=" + L.lateGrace + row + ")," +
         L.lateMin + row + ",0)/60"
       : "0";
-    return "IF(ISNUMBER(" + cell + ")," + worked + ",0)+" + excused;
+    var earlyIn = L.earlyIn ? L.earlyIn + row + "/60" : "0";
+    return "MAX(0,IF(ISNUMBER(" + cell + ")," + worked + ",0)-" + earlyIn + "+" + excused + ")";
   }
 
   function paymentExpression(L, row, hasDayOff) {
@@ -906,6 +940,8 @@
     var hoursIndex = mapping.hoursIndex;
     var statusIndex = mapping.statusIndex;
     var lateIndex = mapping.lateIndex;
+    var schedInIndex = findColumn(headers, [/scheduled\s*in/i, /shift\s*in/i, /planned\s*in/i]);
+    var timeInIndex = findColumn(headers, [/^time\s*in$/i, /actual\s*in/i, /punch\s*in/i]);
     var required = mapping.requiredHours;
     var lateGrace = mapping.lateGrace;
     var hoursFormat = mapping.hoursFormat;
@@ -941,7 +977,11 @@
       // they had been worked. Past it nothing is excused — every minute counts.
       var lateMinutes = lateIndex >= 0 ? parseLateMinutes(row[lateIndex]) : 0;
       var excused = lateMinutes > 0 && lateMinutes <= lateGrace ? lateMinutes : 0;
-      var paidHours = hours + excused / 60;
+      // Time clocked before the shift was due to start is not owed, so it cannot
+      // make up for leaving early later the same day.
+      var earlyIn = schedInIndex >= 0 && timeInIndex >= 0
+        ? earlyArrivalMinutes(row[schedInIndex], row[timeInIndex]) : 0;
+      var paidHours = Math.max(0, hours - earlyIn / 60 + excused / 60);
       var pct = required > 0 ? paidHours / required : null;
 
       return {
@@ -951,6 +991,7 @@
         hours: hours,
         paidHours: paidHours,
         lateMinutes: lateMinutes,
+        earlyIn: earlyIn,
         excused: excused,
         date: date,
         dayOff: dayOff,
@@ -967,6 +1008,8 @@
       hoursIndex: hoursIndex,
       statusIndex: statusIndex,
       lateIndex: lateIndex,
+      schedInIndex: schedInIndex,
+      timeInIndex: timeInIndex,
       requiredHours: required,
       lateGrace: lateGrace,
       hoursFormat: hoursFormat,
@@ -1149,6 +1192,7 @@
         costCenter: null,               // filled in by the user
         required: model.requiredHours,
         lateMin: model.computed[index].lateMinutes,
+        earlyIn: model.computed[index].earlyIn,
         lateGrace: model.lateGrace,
         paidHours: hoursLetter
           ? { formula: paidHoursExpression(letters, r, hoursLetter, model.hoursFormat) }
@@ -1296,7 +1340,9 @@
       : "Total Hours read as a decimal number of hours.");
     line("Late grace", model.lateGrace + " minutes. At or under it the late minutes are paid; " +
       "over it every late minute of that day counts.");
-    line("Paid Hours", "Worked hours plus the late minutes the grace forgives.");
+    line("Paid Hours", "Worked hours, less any time clocked before the shift was due to start, " +
+      "plus the late minutes the grace forgives.");
+    line("Early arrival", "Never paid, and never offsets leaving early later the same day.");
     line("Payment cap", "Payment for Day never exceeds Daily Salary.");
     line("Day off pay", "A day off pays the full Daily Salary, worked or not.");
     line("Excess Above Cap", "Daily Salary x (Completion % - 100%), when over 100%. Zero on a day off.");
@@ -1339,6 +1385,7 @@
     { key: "hours",      patterns: [/^total\s*hours$/i, /total\s*hours/i] },
     { key: "required",   patterns: [/required\s*hours/i] },
     { key: "lateMin",    patterns: [/late\s*minutes/i] },
+    { key: "earlyIn",    patterns: [/early\s*arrival/i] },
     { key: "lateGrace",  patterns: [/late\s*grace/i] },
     { key: "paidHours",  patterns: [/paid\s*hours/i] },
     { key: "pct",        patterns: [/completion/i] },
@@ -1367,7 +1414,7 @@
   var SUMMARY_FORMATS = {
     date: "dd-mmm-yyyy", hours: "0.00", required: "0.00", pct: "0.0%",
     monthly: "#,##0.00", days: "0", daily: "#,##0.00", payment: "#,##0.00",
-    lateMin: "0", lateGrace: "0", paidHours: "0.00",
+    lateMin: "0", earlyIn: "0", lateGrace: "0", paidHours: "0.00",
     excess: "#,##0.00", otHours: "0.00", manualOt: "0.00", otValue: "#,##0.00", otPay: "#,##0.00",
     incentive: "#,##0.00", deduction: "#,##0.00", net: "#,##0.00"
   };
@@ -1489,7 +1536,8 @@
       var grace = numberAt(row, cols.lateGrace);
       if (grace === null) grace = DEFAULT_LATE_GRACE_MINUTES;
       var excused = lateMinutes > 0 && lateMinutes <= grace ? lateMinutes : 0;
-      var paidHours = hours + excused / 60;
+      var earlyIn = numberAt(row, cols.earlyIn) || 0;
+      var paidHours = Math.max(0, hours - earlyIn / 60 + excused / 60);
       var monthly = numberAt(row, cols.monthly);
       if (monthly === null) monthlyMissing++;
 
@@ -3971,6 +4019,7 @@
           costCenter: "",
           required: model.requiredHours,
           lateMin: info.lateMinutes,
+          earlyIn: info.earlyIn,
           lateGrace: model.lateGrace,
           paidHours: info.paidHours,
           pct: info.pct,
@@ -4204,6 +4253,19 @@
             var h = asHmm ? hoursFromHmm(v) : v;
             return v + " = " + Math.floor(h) + "h" + pad2(Math.round((h - Math.floor(h)) * 60)) + "m";
           }).join(", ") : "") + ". Change it above if that is wrong."));
+      }
+
+      var schedInIdx = findColumn(cleaned.headers, [/scheduled\s*in/i, /shift\s*in/i, /planned\s*in/i]);
+      var timeInIdx = findColumn(cleaned.headers, [/^time\s*in$/i, /actual\s*in/i, /punch\s*in/i]);
+      if (schedInIdx >= 0 && timeInIdx >= 0) {
+        var earlyRows = 0, earlyTotal = 0;
+        cleaned.rows.forEach(function (row) {
+          var minutes = earlyArrivalMinutes(row[schedInIdx], row[timeInIdx]);
+          if (minutes > 0) { earlyRows++; earlyTotal += minutes; }
+        });
+        cleanupNotes.appendChild(el("li", null,
+          "Early arrivals: " + earlyRows.toLocaleString() + " rows, " + earlyTotal.toLocaleString() +
+          " minutes in total — not paid, and no longer offsetting an early departure."));
       }
 
       if (lateIndex >= 0) {

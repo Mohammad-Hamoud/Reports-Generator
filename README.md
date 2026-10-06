@@ -49,8 +49,9 @@ editable controls before the report is generated.
 | Cost Center | **you fill in** | Left empty for manual entry |
 | Required Hours / Day | calculated | The daily target, `12` by default |
 | Late Minutes | calculated | Lateness read from the Late Coming column, in minutes |
+| Early Arrival (min) | calculated | Minutes clocked before the shift was due to start |
 | Late Grace (min) | calculated | The allowance, `15` by default |
-| Paid Hours | formula | Worked hours plus the late minutes the grace forgives |
+| Paid Hours | formula | Worked hours, less the early arrival, plus the late minutes the grace forgives |
 | Hours Completion % | formula | `Paid Hours ÷ Required Hours`, uncapped so you can see overtime days |
 | Monthly Salary | **you fill in** | Left empty on purpose |
 | Days in Month | formula | `DAY(EOMONTH(date,0))` → 28/29/30/31 |
@@ -88,6 +89,23 @@ the mapping card.
 `Late Minutes` reads the Late Coming column, which arrives as `00:40` style text, an
 Excel time cell or a plain number. The grace applies to lateness only — leaving early is
 never excused.
+
+### Early arrival
+
+Turning up before the shift was due to start earns nothing, and — the point — it no longer
+quietly covers an early departure later the same day. `Total Hours` is the span from the
+first punch to the last, so a 06:00 start against an 07:00 shift carried an hour of unowed
+credit that cancelled an hour left early. `Paid Hours` subtracts those minutes, which makes
+the credited time run from the scheduled start:
+
+```
+Paid Hours = Total Hours − Early Arrival + excused late
+           = Required Hours − counted late − early departure
+```
+
+Both forms agree to the minute on every row of the reported file. Overtime past the
+scheduled end is left in, so a long day still reads above 100% and the payment cap handles
+it.
 
 ### Hours format
 
