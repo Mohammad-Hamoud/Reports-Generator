@@ -281,6 +281,31 @@ punch out**.
 A punch that did not authenticate is not a punch — `Authentication Failed`, `Duplicate`,
 `Capture Failed` and `Invalid User` rows are left out, and the counts are reported.
 
+### Terminals that are not the door
+
+Not every reader in the file marks the start or the end of a working day, so some are
+**excluded by default**: `turnstile, IFI, AOU, SBC`. The words are matched as plain text
+anywhere in the terminal name and the list is editable.
+
+| Excluded | Why |
+| --- | --- |
+| the five `AIC - Turnstile …` readers | internal gates, not the site boundary — people pass them several times a day |
+| `IFI - Factory Admin`, `IFI - Factory Security`, `AOU - IFI` | International Food Industrial Company |
+| `AOU - ZBC`, `SBC Office`, `SBC - Jeddah Depo` | Afia International company for Distribution & Marketing |
+
+The turnstiles are what made the data look busier than it was. On the October export,
+excluding them takes days with more than one shift from **3,980 down to 508** — the extra
+“shifts” were trips through an internal gate, not separate spells of work.
+
+Every terminal in the file is listed in the tab with its event and employee counts and
+whether it is kept or excluded, so the choice is visible and reversible. Clearing the
+field keeps everything.
+
+Excluding a terminal can remove an employee from the report entirely, if that reader was
+the only place they appeared — on the October export, 163 of 771. That is counted on
+screen and on the `Summary` sheet rather than quietly happening, together with the event
+count for each excluded terminal.
+
 ### Stitching the punches into days
 
 Each employee's events are walked in time order. A way in opens a shift, a way out closes
@@ -315,6 +340,7 @@ what TAS reports too — so a break between two shifts counts as worked time, an
 | Scheduled In | empty | Fills the column, which is what `Late Coming` and `Early Arrival` are measured against |
 | Scheduled Out | empty | Fills the column, used for `Early Going` |
 | Weekly off days | none | e.g. `friday, saturday` — stamped as `Weekly Off` in `Status` |
+| Exclude terminals containing | `turnstile, IFI, AOU, SBC` | Leaves those readers' events out entirely |
 | Successful authentications only | on | Leaves out the failed reads |
 | Add a row for days with no punches | off | Fills an employee's own span with `Absent` rows |
 

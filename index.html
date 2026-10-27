@@ -188,6 +188,8 @@
     display: grid; grid-template-columns: 90px 1fr 210px; gap: 10px;
     align-items: center; padding: 6px 0; border-top: 1px solid var(--border);
   }
+  .keymap.terms .keyrow { grid-template-columns: minmax(0, 1fr) 190px 90px; }
+  .keymap.terms .keyname { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .keyrow:first-of-type { border-top: 0; }
   .keyname { font-weight: 650; font-variant-numeric: tabular-nums; }
   .keycount { color: var(--muted); font-size: 12.5px; }
@@ -196,6 +198,13 @@
     border: 1px solid var(--border); background: var(--surface-2); color: var(--text);
   }
   .keyrow select:focus { outline: 2px solid var(--green-500); outline-offset: 1px; }
+  .keystate {
+    font-size: 11.5px; font-weight: 650; text-transform: uppercase; letter-spacing: .04em;
+    padding: 4px 9px; border-radius: 999px; text-align: center; justify-self: start;
+  }
+  .keymap.terms .scroll { max-height: 300px; overflow: auto; }
+  .keystate.in { color: var(--green-600); background: var(--green-50); }
+  .keystate.out { color: var(--amber-600); background: var(--tint-input); }
   @media (max-width: 620px) {
     .keyrow { grid-template-columns: 1fr 1fr; }
     .keyrow select { grid-column: 1 / -1; }
@@ -1360,6 +1369,9 @@
       line("Events in the file", fold.events);
       line("Events used", fold.used);
       line("Events skipped", fold.droppedCount + fold.ignored + fold.unreadable + fold.nameless);
+      line("Excluded terminals", fold.excludedWords.length ? fold.excludedWords.join(", ") : "none");
+      line("Events at excluded terminals", fold.offSiteCount);
+      line("Employees only seen there", fold.offSiteOnly);
       line("Employees", fold.employees);
       line("Day records", fold.dayRecords);
       if (fold.from) line("Period", fold.from + "  to  " + fold.to);
@@ -1379,6 +1391,9 @@
       line("Total Hours", "The span from the first way-in punch to the last way-out punch.");
       Object.keys(fold.dropped).forEach(function (reason) {
         line("Skipped — " + reason, fold.dropped[reason]);
+      });
+      fold.offSite.forEach(function (terminal) {
+        line("Excluded — " + terminal.name.trim(), terminal.count);
       });
     }
 
@@ -2921,6 +2936,13 @@
   // that one — it stops a missing punch swallowing days of absence.
   var UBIO_MAX_SHIFT_HOURS = 16;
 
+  // The turnstiles are internal gates rather than the site boundary, and the
+  // IFI, AOU and SBC doors belong to other companies, so none of them are an
+  // AIC casual's attendance. Matched as plain text anywhere in the terminal
+  // name, which is enough to catch all five turnstiles and leave
+  // "Registration terminal" alone.
+  var UBIO_EXCLUDED_TERMINALS = "turnstile, IFI, AOU, SBC";
+
   var UBIO_FIELDS = [
     { key: "code",     patterns: [/^unique\s*id$/i, /unique\s*id/i, /employee\s*code/i] },
     { key: "userId",   patterns: [/^user\s*id$/i, /user\s*id/i] },
@@ -3026,6 +3048,55 @@
     return null;
   }
 
+  function isExcludedTerminal(name, words) {
+    if (!words.length) return false;
+    var text = String(name === null || name === undefined ? "" : name).toLowerCase();
+    for (var i = 0; i < words.length; i++) {
+      if (text.indexOf(words[i]) >= 0) return true;
+    }
+    return false;
+  }
+
+  /**
+   * The identity two events have to share to be the same employee. The Unique
+   * ID is the employee code and the terminal's User ID only stands in when it
+   * is missing; matching follows Excel's own rules, so a code with a letter is
+   * never equal to a bare number.
+   */
+  function ubioPersonKey(code, userId, name) {
+    var id = tidyEmployeeCode(code) || tidyEmployeeCode(userId);
+    if (id !== "") return excelMatchKey(id);
+    return name !== "" ? "name:" + name.toLowerCase() : "";
+  }
+
+  /** Every terminal in the file, busiest first, flagged if it is excluded. */
+  function ubioTerminalTally(raw, words) {
+    var cols = ubioColumns(raw.headers);
+    if (cols.terminal === undefined) return [];
+
+    var seen = {}, order = [];
+    raw.rows.forEach(function (row) {
+      var name = String(row[cols.terminal] === null || row[cols.terminal] === undefined ? "" : row[cols.terminal]).trim();
+      if (name === "") return;
+      if (!seen[name]) { seen[name] = { name: name, count: 0, people: {} }; order.push(name); }
+      seen[name].count++;
+      var id = ubioPersonKey(
+        cols.code === undefined ? "" : row[cols.code],
+        cols.userId === undefined ? "" : row[cols.userId],
+        cols.name === undefined ? "" : String(row[cols.name] || "").trim());
+      if (id) seen[name].people[id] = true;
+    });
+
+    return order.map(function (name) {
+      return {
+        name: name,
+        count: seen[name].count,
+        people: Object.keys(seen[name].people).length,
+        excluded: isExcludedTerminal(name, words)
+      };
+    }).sort(function (a, b) { return b.count - a.count; });
+  }
+
   /** Every Function Key in the file with its event count, commonest first. */
   function ubioKeyTally(raw) {
     var cols = ubioColumns(raw.headers);
@@ -3123,6 +3194,8 @@
     var schedOutText = String(options.scheduledOut || "").trim();
     var schedIn = clockMinutes(schedInText);
     var schedOut = clockMinutes(schedOutText);
+    var excluded = parseKeywords(options.excludeTerminals === undefined
+      ? UBIO_EXCLUDED_TERMINALS : options.excludeTerminals);
 
     var dayFirst = detectDayFirst(raw.rows.map(function (row) {
       var text = String(row[cols.stamp] === null || row[cols.stamp] === undefined ? "" : row[cols.stamp]);
@@ -3131,6 +3204,7 @@
 
     var people = {}, order = [];
     var dropped = {}, droppedCount = 0;
+    var offSite = {}, offSiteCount = 0, offSiteIds = {};
     var ignored = 0, unreadable = 0, nameless = 0, fromTerminal = 0, undirected = 0, used = 0;
 
     raw.rows.forEach(function (row) {
@@ -3138,6 +3212,17 @@
         if (cols[key] === undefined) return "";
         var value = row[cols[key]];
         return String(value === null || value === undefined ? "" : value).trim();
+      }
+
+      // An excluded terminal is not this report's door at all, so its events
+      // go before anything else is read off them.
+      var terminal = text("terminal");
+      if (isExcludedTerminal(terminal, excluded)) {
+        offSite[terminal] = (offSite[terminal] || 0) + 1;
+        offSiteCount++;
+        var leftOut = ubioPersonKey(text("code"), text("userId"), text("name"));
+        if (leftOut) offSiteIds[leftOut] = true;
+        return;
       }
 
       // A failed authentication is not a punch: nobody went through the door.
@@ -3160,7 +3245,7 @@
 
       var dir = wanted === "auto" ? null : wanted;
       if (!dir) {
-        dir = ubioTerminalDirection(text("terminal"));
+        dir = ubioTerminalDirection(terminal);
         if (dir) fromTerminal++; else undirected++;
       }
 
@@ -3170,9 +3255,7 @@
       var name = text("name");
       if (code === "" && name === "") { nameless++; return; }
 
-      // Grouped the way Excel's own matching groups, so "C2480440946" and
-      // "2480440946" stay two people — a code with a letter is never a number.
-      var id = code !== "" ? excelMatchKey(code) : "name:" + name.toLowerCase();
+      var id = ubioPersonKey(text("code"), text("userId"), name);
       var person = people[id];
       if (!person) {
         person = people[id] = {
@@ -3192,7 +3275,7 @@
 
       person.events.push({
         ts: stamp.ts, minutes: stamp.minutes, dateKey: stamp.dateKey, date: stamp.date,
-        dir: dir, terminal: text("terminal")
+        dir: dir, terminal: terminal
       });
       used++;
     });
@@ -3317,9 +3400,24 @@
       });
     });
 
+    // Someone whose every punch was at an excluded terminal is not in the
+    // report at all, which has to be said rather than quietly happen.
+    var offSiteOnly = Object.keys(offSiteIds).filter(function (id) { return !people[id]; }).length;
+    var offSiteList = Object.keys(offSite).sort(function (a, b) { return offSite[b] - offSite[a]; })
+      .map(function (name) { return { name: name, count: offSite[name] }; });
+
     var covered = Object.keys(dayKeys).sort();
     var notes = [];
     notes.push(used.toLocaleString() + " events folded into " + rows.length.toLocaleString() + " day records");
+    if (offSiteCount) {
+      notes.push("Excluded " + offSiteCount.toLocaleString() + " events from " + offSiteList.length +
+        " terminal" + (offSiteList.length === 1 ? "" : "s") + " matching “" + excluded.join(", ") + "”: " +
+        offSiteList.map(function (t) { return t.name.trim() + " (" + t.count.toLocaleString() + ")"; }).join(", "));
+    }
+    if (offSiteOnly) {
+      notes.push(offSiteOnly.toLocaleString() + " employee" + (offSiteOnly === 1 ? " punched" : "s punched") +
+        " only at excluded terminals, so " + (offSiteOnly === 1 ? "it is" : "they are") + " not in this report");
+    }
     if (droppedCount) {
       notes.push("Skipped " + droppedCount.toLocaleString() + " event" + (droppedCount === 1 ? "" : "s") +
         " that did not authenticate: " + Object.keys(dropped).sort(function (a, b) { return dropped[b] - dropped[a]; })
@@ -3348,6 +3446,10 @@
         used: used,
         dropped: dropped,
         droppedCount: droppedCount,
+        excludedWords: excluded,
+        offSite: offSiteList,
+        offSiteCount: offSiteCount,
+        offSiteOnly: offSiteOnly,
         ignored: ignored,
         unreadable: unreadable,
         nameless: nameless,
@@ -4383,8 +4485,8 @@
     panel.appendChild(uploadCard);
 
     /* ---- the Ubio fold (Ubio tab only) ---- */
-    var ubioCard, ubioKeyBox, ubioNotes, ubioAlert, shiftInput, schedInInput, schedOutInput,
-        weeklyOffInput, successCheck, fillCheck;
+    var ubioCard, ubioKeyBox, ubioTermBox, ubioNotes, ubioAlert, shiftInput, schedInInput,
+        schedOutInput, weeklyOffInput, excludeInput, successCheck, fillCheck;
     var ubioSelects = [];
 
     if (tab.mode === "ubio") {
@@ -4433,6 +4535,14 @@
       weeklyOffInput.placeholder = "e.g. friday, saturday";
       ubioField("Weekly off days", weeklyOffInput, "Stamped as “Weekly Off” in Status, which is what earns OT.");
 
+      excludeInput = el("input");
+      excludeInput.id = "exclude-" + tab.id;
+      excludeInput.type = "text";
+      excludeInput.value = UBIO_EXCLUDED_TERMINALS;
+      excludeInput.placeholder = "e.g. turnstile, IFI";
+      ubioField("Exclude terminals containing", excludeInput,
+        "Matched anywhere in the terminal name. Every terminal is listed below.");
+
       var checks = el("div", "field");
       checks.appendChild(el("label", null, "Events"));
 
@@ -4453,8 +4563,11 @@
 
       ubioCard.appendChild(ubioFields);
 
-      ubioKeyBox = el("div", "keymap");
+      ubioKeyBox = el("div", "keymap keys");
       ubioCard.appendChild(ubioKeyBox);
+
+      ubioTermBox = el("div", "keymap terms");
+      ubioCard.appendChild(ubioTermBox);
 
       ubioAlert = el("div", "alert warn");
       ubioCard.appendChild(ubioAlert);
@@ -4463,7 +4576,7 @@
       ubioCard.appendChild(ubioNotes);
       panel.appendChild(ubioCard);
 
-      [shiftInput, schedInInput, schedOutInput, weeklyOffInput].forEach(function (control) {
+      [shiftInput, schedInInput, schedOutInput, weeklyOffInput, excludeInput].forEach(function (control) {
         control.addEventListener("change", function () { if (state.raw) applyUbioFold(); });
       });
       [successCheck, fillCheck].forEach(function (control) {
@@ -4887,7 +5000,31 @@
         ubioSelects.push({ key: entry.key.toLowerCase(), select: select });
       });
 
+      renderUbioTerminals();
       ubioCard.hidden = false;
+    }
+
+    function renderUbioTerminals() {
+      ubioTermBox.innerHTML = "";
+
+      var tally = ubioTerminalTally(state.raw, parseKeywords(excludeInput.value));
+      if (!tally.length) return;
+
+      var kept = tally.filter(function (t) { return !t.excluded; }).length;
+      ubioTermBox.appendChild(el("h3", null, "Terminals in this file — " + kept + " kept, " +
+        (tally.length - kept) + " excluded"));
+
+      var scroll = el("div", "scroll");
+      tally.forEach(function (entry) {
+        var row = el("div", "keyrow");
+        row.appendChild(el("span", "keyname", entry.name.trim()));
+        row.appendChild(el("span", "keycount", entry.count.toLocaleString() + " events · " +
+          entry.people.toLocaleString() + " employees"));
+        row.appendChild(el("span", entry.excluded ? "keystate out" : "keystate in",
+          entry.excluded ? "excluded" : "kept"));
+        scroll.appendChild(row);
+      });
+      ubioTermBox.appendChild(scroll);
     }
 
     function readUbioOptions() {
@@ -4900,6 +5037,7 @@
         scheduledIn: schedInInput.value,
         scheduledOut: schedOutInput.value,
         weeklyOff: parseWeekdays(weeklyOffInput.value),
+        excludeTerminals: excludeInput.value,
         onlySuccess: successCheck.checked,
         fillGaps: fillCheck.checked
       };
@@ -4919,6 +5057,7 @@
       downloadBtn.disabled = true;
 
       var fold = state.cleaned.ubio;
+      renderUbioTerminals();
       ubioNotes.innerHTML = "";
       fold.notes.forEach(function (note) { ubioNotes.appendChild(el("li", null, note)); });
       if (fold.from) {
