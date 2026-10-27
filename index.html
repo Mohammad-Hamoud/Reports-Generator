@@ -174,6 +174,32 @@
     background: var(--surface-2); color: var(--text);
   }
   .field select:focus, .field input:focus { outline: 2px solid var(--green-500); outline-offset: 1px; border-color: var(--green-500); }
+  .field .hint { margin-top: 5px; display: block; font-size: 11.5px; line-height: 1.4; }
+  .field label.check {
+    display: flex; align-items: center; gap: 8px; margin: 0 0 7px;
+    font-weight: 500; color: var(--text); font-size: 13px; cursor: pointer;
+  }
+  .field label.check input { width: auto; padding: 0; }
+
+  /* ---------- the Ubio function-key map ---------- */
+
+  .keymap h3 { font-size: 14px; margin: 20px 0 8px; font-weight: 650; }
+  .keyrow {
+    display: grid; grid-template-columns: 90px 1fr 210px; gap: 10px;
+    align-items: center; padding: 6px 0; border-top: 1px solid var(--border);
+  }
+  .keyrow:first-of-type { border-top: 0; }
+  .keyname { font-weight: 650; font-variant-numeric: tabular-nums; }
+  .keycount { color: var(--muted); font-size: 12.5px; }
+  .keyrow select {
+    font: inherit; font-size: 13.5px; padding: 7px 10px; border-radius: 9px;
+    border: 1px solid var(--border); background: var(--surface-2); color: var(--text);
+  }
+  .keyrow select:focus { outline: 2px solid var(--green-500); outline-offset: 1px; }
+  @media (max-width: 620px) {
+    .keyrow { grid-template-columns: 1fr 1fr; }
+    .keyrow select { grid-column: 1 / -1; }
+  }
 
   .notes { list-style: none; padding: 0; margin: 16px 0 0; font-size: 13px; color: var(--muted); }
   .notes li { padding: 3px 0 3px 20px; position: relative; }
@@ -302,8 +328,13 @@
     { id: "casuals-detailed", title: "Casuals Detailed Report", mode: "casuals" },
     { id: "fte-detailed",     title: "FTE Detailed Report",     mode: "merge" },
     { id: "casual-summary",   title: "Casual Period Summary",   mode: "period" },
-    { id: "fte-summary",      title: "FTE Period Summary",      mode: "basic" }
+    { id: "fte-summary",      title: "FTE Period Summary",      mode: "basic" },
+    { id: "ubio",             title: "Ubio",                    mode: "ubio" }
   ];
+
+  // The Ubio tab folds its access log into the casuals shape and then runs the
+  // very same pipeline, so everything keyed off "casuals" applies to it too.
+  function isCasualsMode(mode) { return mode === "casuals" || mode === "ubio"; }
 
   var PREVIEW_ROWS = 100;
   var DEFAULT_REQUIRED_HOURS = 12;
@@ -944,6 +975,7 @@
     var timeInIndex = findColumn(headers, [/^time\s*in$/i, /actual\s*in/i, /punch\s*in/i]);
     var required = mapping.requiredHours;
     var lateGrace = mapping.lateGrace;
+    var sheetTitle = mapping.sheetTitle || "Casuals Detailed Report";
     var hoursFormat = mapping.hoursFormat;
     var dayOffWords = parseKeywords(mapping.dayOffWords);
 
@@ -1016,6 +1048,8 @@
       dayOffWords: dayOffWords,
       datesParsed: datesParsed,
       hoursConverted: hoursConverted,
+      sheetTitle: sheetTitle,
+      ubio: cleaned.ubio || null,
       sourceCount: headers.length,
       payrollColumns: payrollColumnsFor(headers)
     };
@@ -1112,7 +1146,7 @@
     workbook.created = new Date();
     workbook.calcProperties.fullCalcOnLoad = true;
 
-    var sheet = workbook.addWorksheet("Casuals Detailed Report", {
+    var sheet = workbook.addWorksheet(model.sheetTitle, {
       views: [{ state: "frozen", ySplit: 1, xSplit: Math.min(2, model.sourceCount) }],
       properties: { defaultRowHeight: 18 }
     });
@@ -1292,7 +1326,7 @@
     }
 
     section("Report");
-    line("Report", "Casuals Detailed Report");
+    line("Report", model.sheetTitle);
     line("Source file", meta.fileName);
     line("Source sheet", meta.sheetName);
     line("Generated", new Date().toLocaleString());
@@ -1319,11 +1353,40 @@
     line("Dates converted", model.datesParsed);
     line("Merged cells", "unmerged");
 
+    if (model.ubio) {
+      var fold = model.ubio;
+      sheet.addRow([]);
+      section("Ubio access log");
+      line("Events in the file", fold.events);
+      line("Events used", fold.used);
+      line("Events skipped", fold.droppedCount + fold.ignored + fold.unreadable + fold.nameless);
+      line("Employees", fold.employees);
+      line("Day records", fold.dayRecords);
+      if (fold.from) line("Period", fold.from + "  to  " + fold.to);
+      line("Direction from terminal name", fold.fromTerminal);
+      line("Events with no direction", fold.undirected);
+      line("Days with no way-out punch", fold.missingOut);
+      line("Days with no way-in punch", fold.missingIn);
+      line("Days spanning midnight", fold.overnight);
+      line("Days with a stray earlier way out", fold.strayOut);
+      line("Days with more than one shift", fold.splitDays);
+      line("Rows added for days with no punches", fold.filled);
+      line("Longest shift paired", fold.maxShiftHours + " hours");
+      line("Scheduled In / Out", fold.scheduledIn || fold.scheduledOut
+        ? (fold.scheduledIn || "—") + " / " + (fold.scheduledOut || "—")
+        : "not set — no lateness assumed");
+      line("Weekly off", fold.weeklyOff.length ? fold.weeklyOff.join(", ") : "none");
+      line("Total Hours", "The span from the first way-in punch to the last way-out punch.");
+      Object.keys(fold.dropped).forEach(function (reason) {
+        line("Skipped — " + reason, fold.dropped[reason]);
+      });
+    }
+
     sheet.addRow([]);
     section("Payroll totals");
 
     function total(label, key) {
-      line(label, { formula: "SUM('Casuals Detailed Report'!" + letters[key] + "2:" + letters[key] + lastRow + ")" }, "#,##0.00");
+      line(label, { formula: "SUM(" + quoteSheet(model.sheetTitle) + "!" + letters[key] + "2:" + letters[key] + lastRow + ")" }, "#,##0.00");
     }
 
     total("Total payment for days", "payment");
@@ -1672,6 +1735,9 @@
       lastDay: dates.length ? new Date(dates[dates.length - 1]) : null,
       monthlyMissing: monthlyMissing,
       hoursFormat: hoursFormat,
+      // carried so the workbook's own day-off test cannot drift from the one
+      // the roll-up above was computed with
+      dayOffWords: dayOffWords,
       mergedCodes: mergedCodes,
       mergedPairs: mergedPairs,
       totals: employeeList.reduce(function (all, e) {
@@ -2822,7 +2888,495 @@
   ];
 
   /* ================================================================== *
-   * placeholder report used by the two remaining tabs
+   * Ubio — folding an access log into the casuals report shape
+   *
+   * The Ubio platform exports one row per authentication: who, when, which
+   * terminal, and a Function Key saying which way they went. The casuals
+   * report wants one row per employee per day, so the events are stitched
+   * into shifts and folded down to days. The folded sheet is then handed to
+   * the ordinary casuals pipeline, which is why the headers below are the
+   * ones its detectors look for.
+   * ================================================================== */
+
+  /**
+   * F1 is a way in and F3 a way out. The rest are what the same export calls
+   * the door at other sites: F2 and F4 stand in for F3 and F1, the TNA
+   * terminals write Attend / Leave / Out, and a plain "Access" carries no
+   * direction at all — those are resolved from the terminal's name instead.
+   */
+  var UBIO_DIRECTIONS = {
+    f1: "in", f3: "out", f2: "out", f4: "in",
+    attend: "in", leave: "out", "in": "in", out: "out",
+    entry: "in", exit: "out", access: "auto"
+  };
+
+  var UBIO_DIRECTION_LABELS = [
+    ["in", "Way in"],
+    ["out", "Way out"],
+    ["auto", "From the terminal name"],
+    ["ignore", "Ignore these events"]
+  ];
+
+  // An OUT further than this from the open IN belongs to another shift, not to
+  // that one — it stops a missing punch swallowing days of absence.
+  var UBIO_MAX_SHIFT_HOURS = 16;
+
+  var UBIO_FIELDS = [
+    { key: "code",     patterns: [/^unique\s*id$/i, /unique\s*id/i, /employee\s*code/i] },
+    { key: "userId",   patterns: [/^user\s*id$/i, /user\s*id/i] },
+    { key: "name",     patterns: [/^user\s*name$/i, /user\s*name/i, /employee\s*name/i] },
+    { key: "company",  patterns: [/^group\s*name$/i, /group\s*name/i, /^company$/i] },
+    { key: "position", patterns: [/^position$/i, /job\s*title/i] },
+    { key: "stamp",    patterns: [/^event\s*time$/i, /event\s*time/i, /punch\s*time/i, /date\s*(and\s*)?time/i] },
+    { key: "fnKey",    patterns: [/^function\s*key$/i, /function\s*key/i] },
+    { key: "terminal", patterns: [/^terminal\s*name$/i, /terminal\s*name/i, /device\s*name/i] },
+    { key: "result",   patterns: [/^auth\s*result$/i, /auth\s*result/i, /^result$/i] }
+  ];
+
+  /* The folded sheet. Every title here is one a casuals detector finds: Date,
+     Total Hours, Status, Late Coming, Scheduled In and Time In. */
+  var UBIO_HEADERS = [
+    "Employee Code", "Employee Name", "Device User ID", "Company", "Position",
+    "Date", "Day", "Scheduled In", "Scheduled Out", "Time In", "Time Out",
+    "Total Hours", "Late Coming", "Early Going", "Punches", "Shifts",
+    "In Terminal", "Out Terminal", "Status", "Note"
+  ];
+
+  var WEEKDAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+  function ubioColumns(headers) {
+    var cols = {};
+    UBIO_FIELDS.forEach(function (field) {
+      var index = findColumn(headers, field.patterns);
+      if (index >= 0) cols[field.key] = index;
+    });
+    return cols;
+  }
+
+  function looksLikeUbio(headers) {
+    var cols = ubioColumns(headers);
+    return cols.stamp !== undefined && cols.fnKey !== undefined &&
+      (cols.code !== undefined || cols.userId !== undefined);
+  }
+
+  /**
+   * "2026-10-15 23:43:00" → an absolute instant plus the day it fell on, both
+   * built in UTC so the fold reads the same in every timezone. Dates written
+   * the other way round ("15/10/2026 23:43") and real date cells work too.
+   */
+  function parseUbioStamp(value, dayFirst) {
+    var year, month, day, hour = 0, minute = 0, second = 0, time;
+
+    if (value instanceof Date) {
+      if (isNaN(value.getTime())) return null;
+      year = value.getUTCFullYear(); month = value.getUTCMonth() + 1; day = value.getUTCDate();
+      hour = value.getUTCHours(); minute = value.getUTCMinutes(); second = value.getUTCSeconds();
+    } else if (isDateSerial(value)) {
+      return parseUbioStamp(excelSerialToDate(value), dayFirst);
+    } else {
+      var text = String(value === null || value === undefined ? "" : value).trim();
+      if (text === "") return null;
+
+      var iso = text.match(/^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})(.*)$/);
+      if (iso) {
+        year = +iso[1]; month = +iso[2]; day = +iso[3]; time = iso[4];
+      } else {
+        var local = text.match(/^(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{4})(.*)$/);
+        if (!local) return null;
+        day = dayFirst ? +local[1] : +local[2];
+        month = dayFirst ? +local[2] : +local[1];
+        year = +local[3];
+        time = local[4];
+      }
+
+      var clock = String(time || "").match(/(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(am|pm)?/i);
+      if (clock) {
+        hour = +clock[1]; minute = +clock[2]; second = clock[3] ? +clock[3] : 0;
+        if (clock[4]) {
+          var pm = /pm/i.test(clock[4]);
+          if (pm && hour < 12) hour += 12;
+          if (!pm && hour === 12) hour = 0;
+        }
+      }
+    }
+
+    if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+
+    var midnight = Date.UTC(year, month - 1, day);
+    if (isNaN(midnight)) return null;
+
+    return {
+      ts: midnight + ((hour * 60 + minute) * 60 + second) * 1000,
+      date: new Date(midnight),
+      dateKey: year + "-" + pad2(month) + "-" + pad2(day),
+      minutes: hour * 60 + minute
+    };
+  }
+
+  /**
+   * A turnstile says its own direction in its name — "AIC - Turnstile -02
+   * (Out)" against "AIC - Turnstile -01 (In - meddle)". Only consulted for an
+   * event whose Function Key carries no direction of its own, and the word has
+   * to stand alone so "Admin" is not read as "in".
+   */
+  function ubioTerminalDirection(name) {
+    var text = String(name === null || name === undefined ? "" : name).toLowerCase();
+    if (/\b(out|exit|leaving|outgoing)\b/.test(text)) return "out";
+    if (/\b(in|entry|entrance|incoming)\b/.test(text)) return "in";
+    return null;
+  }
+
+  /** Every Function Key in the file with its event count, commonest first. */
+  function ubioKeyTally(raw) {
+    var cols = ubioColumns(raw.headers);
+    if (cols.fnKey === undefined) return [];
+
+    var counts = {};
+    raw.rows.forEach(function (row) {
+      var key = String(row[cols.fnKey] === null || row[cols.fnKey] === undefined ? "" : row[cols.fnKey]).trim();
+      if (key === "") return;
+      counts[key] = (counts[key] || 0) + 1;
+    });
+
+    return Object.keys(counts).sort(function (a, b) { return counts[b] - counts[a]; })
+      .map(function (key) {
+        return {
+          key: key,
+          count: counts[key],
+          direction: UBIO_DIRECTIONS[key.toLowerCase()] || "auto"
+        };
+      });
+  }
+
+  /** "fri, sat" → [5, 6]. Anything unrecognised is ignored. */
+  function parseWeekdays(text) {
+    var wanted = [];
+    parseKeywords(text).forEach(function (word) {
+      for (var d = 0; d < WEEKDAY_NAMES.length; d++) {
+        if (WEEKDAY_NAMES[d].toLowerCase().indexOf(word) === 0 && wanted.indexOf(d) < 0) wanted.push(d);
+      }
+    });
+    return wanted.sort();
+  }
+
+  function minutesToClock(minutes) {
+    if (minutes === null || !isFinite(minutes)) return "";
+    return pad2(Math.floor(minutes / 60)) + ":" + pad2(Math.round(minutes % 60));
+  }
+
+  function nextDayKey(key) {
+    var day = new Date(key + "T00:00:00Z");
+    day.setUTCDate(day.getUTCDate() + 1);
+    return day.toISOString().slice(0, 10);
+  }
+
+  /**
+   * Walks one employee's events in time order and pairs them up. An IN opens a
+   * shift, the next OUT closes it, and a later OUT replaces an earlier one, so
+   * a span that runs past midnight stays one shift dated on the day it started.
+   * An event with no direction of its own is taken as the opening punch when
+   * nothing is open and as the closing punch when something is — which is the
+   * earliest-in, latest-out reading the turnstiles only support that way.
+   */
+  function stitchUbioShifts(events, maxShiftMs) {
+    events.sort(function (a, b) { return a.ts - b.ts; });
+
+    var shifts = [], open = null;
+
+    function close() {
+      if (open) { shifts.push(open); open = null; }
+    }
+
+    events.forEach(function (event) {
+      if (event.dir === "in") {
+        close();
+        open = { start: event, end: null, events: [event] };
+        return;
+      }
+
+      if (open && event.ts - open.start.ts <= maxShiftMs) {
+        open.end = event;
+        open.events.push(event);
+        return;
+      }
+
+      close();
+      if (event.dir === "out") shifts.push({ start: null, end: event, events: [event] });
+      else open = { start: event, end: null, events: [event] };
+    });
+
+    close();
+    return shifts;
+  }
+
+  function buildUbioAttendance(raw, options) {
+    var cols = ubioColumns(raw.headers);
+    if (cols.stamp === undefined || cols.fnKey === undefined) {
+      throw new Error("This does not look like a Ubio access log — it needs an Event Time and a Function Key column.");
+    }
+
+    var directions = options.directions || {};
+    var maxShiftMs = Math.max(1, options.maxShiftHours || UBIO_MAX_SHIFT_HOURS) * 3600000;
+    var onlySuccess = options.onlySuccess !== false;
+    var weeklyOff = options.weeklyOff || [];
+    var schedInText = String(options.scheduledIn || "").trim();
+    var schedOutText = String(options.scheduledOut || "").trim();
+    var schedIn = clockMinutes(schedInText);
+    var schedOut = clockMinutes(schedOutText);
+
+    var dayFirst = detectDayFirst(raw.rows.map(function (row) {
+      var text = String(row[cols.stamp] === null || row[cols.stamp] === undefined ? "" : row[cols.stamp]);
+      return /^\d{1,2}[-\/.]/.test(text) ? text.split(/[T ]/)[0] : null;
+    }));
+
+    var people = {}, order = [];
+    var dropped = {}, droppedCount = 0;
+    var ignored = 0, unreadable = 0, nameless = 0, fromTerminal = 0, undirected = 0, used = 0;
+
+    raw.rows.forEach(function (row) {
+      function text(key) {
+        if (cols[key] === undefined) return "";
+        var value = row[cols[key]];
+        return String(value === null || value === undefined ? "" : value).trim();
+      }
+
+      // A failed authentication is not a punch: nobody went through the door.
+      if (onlySuccess) {
+        var result = text("result");
+        if (result !== "" && !/^success$/i.test(result)) {
+          dropped[result] = (dropped[result] || 0) + 1;
+          droppedCount++;
+          return;
+        }
+      }
+
+      var stamp = parseUbioStamp(row[cols.stamp], dayFirst);
+      if (!stamp) { unreadable++; return; }
+
+      var key = text("fnKey").toLowerCase();
+      var wanted = directions[key];
+      if (wanted === undefined) wanted = UBIO_DIRECTIONS[key] || "auto";
+      if (wanted === "ignore") { ignored++; return; }
+
+      var dir = wanted === "auto" ? null : wanted;
+      if (!dir) {
+        dir = ubioTerminalDirection(text("terminal"));
+        if (dir) fromTerminal++; else undirected++;
+      }
+
+      // The Unique ID is the employee code; the User ID is the number the
+      // terminal knows them by, which is often a truncation of it.
+      var code = tidyEmployeeCode(text("code")) || tidyEmployeeCode(text("userId"));
+      var name = text("name");
+      if (code === "" && name === "") { nameless++; return; }
+
+      // Grouped the way Excel's own matching groups, so "C2480440946" and
+      // "2480440946" stay two people — a code with a letter is never a number.
+      var id = code !== "" ? excelMatchKey(code) : "name:" + name.toLowerCase();
+      var person = people[id];
+      if (!person) {
+        person = people[id] = {
+          code: code, name: name, userId: text("userId"),
+          company: "", position: "", events: []
+        };
+        order.push(id);
+      }
+
+      if (!person.name) person.name = name;
+      if (!person.userId) person.userId = text("userId");
+      if (!person.company) {
+        var company = text("company");
+        if (company !== "" && company !== "---") person.company = company;
+      }
+      if (!person.position) person.position = text("position");
+
+      person.events.push({
+        ts: stamp.ts, minutes: stamp.minutes, dateKey: stamp.dateKey, date: stamp.date,
+        dir: dir, terminal: text("terminal")
+      });
+      used++;
+    });
+
+    var rows = [], dayKeys = {};
+    var missingIn = 0, missingOut = 0, splitDays = 0, overnight = 0, filled = 0, lateDays = 0, strayOut = 0;
+
+    order.sort(function (a, b) {
+      var left = people[a], right = people[b];
+      return (left.name || left.code).localeCompare(right.name || right.code) ||
+        left.code.localeCompare(right.code);
+    });
+
+    order.forEach(function (id) {
+      var person = people[id];
+      var days = {}, present = [];
+
+      stitchUbioShifts(person.events, maxShiftMs).forEach(function (shift) {
+        var anchor = shift.start || shift.end;
+        var day = days[anchor.dateKey];
+        if (!day) {
+          day = days[anchor.dateKey] = { date: anchor.date, shifts: 0, punches: 0, starts: [], ends: [] };
+          present.push(anchor.dateKey);
+        }
+        day.shifts++;
+        day.punches += shift.events.length;
+        if (shift.start) day.starts.push(shift.start);
+        if (shift.end) day.ends.push(shift.end);
+      });
+
+      present.sort();
+
+      // Only the employee's own span is filled in — a day before their first
+      // punch or after their last is not an absence we can claim to know about.
+      var wanted = present.slice();
+      if (options.fillGaps && present.length > 1) {
+        wanted = [];
+        for (var key = present[0]; key <= present[present.length - 1]; key = nextDayKey(key)) {
+          wanted.push(key);
+          if (wanted.length > 400) break;
+        }
+      }
+
+      wanted.forEach(function (dateKey) {
+        var day = days[dateKey];
+        if (!day) {
+          day = { date: new Date(dateKey + "T00:00:00Z"), shifts: 0, punches: 0, starts: [], ends: [] };
+          filled++;
+        }
+
+        dayKeys[dateKey] = true;
+
+        var start = null, end = null, stray = null;
+        day.starts.forEach(function (event) {
+          if (!start || event.ts < start.ts) start = event;
+        });
+        day.ends.forEach(function (event) {
+          // A way out before the day's first way in closes a shift that opened
+          // earlier than this file reaches. It is not this day's way out, and
+          // pairing it with a later way in would read as negative hours.
+          if (start && event.ts < start.ts) {
+            if (!stray || event.ts > stray.ts) stray = event;
+            return;
+          }
+          if (!end || event.ts > end.ts) end = event;
+        });
+
+        var isWeeklyOff = weeklyOff.indexOf(day.date.getUTCDay()) >= 0;
+        var notes = [];
+        var hours = null, late = "", early = "";
+
+        if (start && end) {
+          hours = Math.round((end.ts - start.ts) / 360) / 10000;
+          if (end.dateKey !== start.dateKey) {
+            overnight++;
+            notes.push("out on " + end.dateKey);
+          }
+        } else if (start) {
+          missingOut++;
+          notes.push("no way-out punch");
+        } else if (end) {
+          missingIn++;
+          notes.push("no way-in punch");
+        }
+
+        if (stray) {
+          strayOut++;
+          notes.push("earlier way-out punch at " + minutesToClock(stray.minutes) + " left out");
+        }
+        if (day.shifts > 1) { splitDays++; notes.push(day.shifts + " shifts"); }
+        if (!day.punches) notes.push("no punches");
+
+        if (schedIn !== null && start) {
+          var lateMinutes = start.minutes - schedIn;
+          if (lateMinutes > 0) { late = minutesToClock(lateMinutes); lateDays++; }
+        }
+
+        if (schedOut !== null && end) {
+          var leftAt = end.minutes + (start && end.dateKey !== start.dateKey ? 1440 : 0);
+          var earlyMinutes = schedOut - leftAt;
+          if (earlyMinutes > 0) early = minutesToClock(earlyMinutes);
+        }
+
+        var status = isWeeklyOff ? "Weekly Off"
+          : start && end ? "Present"
+          : start ? "Missing Out"
+          : end ? "Missing In"
+          : "Absent";
+
+        rows.push([
+          person.code, person.name, person.userId, person.company, person.position,
+          day.date, WEEKDAY_NAMES[day.date.getUTCDay()].slice(0, 3),
+          schedInText, schedOutText,
+          start ? minutesToClock(start.minutes) : "",
+          end ? minutesToClock(end.minutes) : "",
+          hours, late, early,
+          day.punches || null, day.shifts || null,
+          start ? start.terminal : "",
+          end ? end.terminal : "",
+          status, notes.join("; ")
+        ]);
+      });
+    });
+
+    var covered = Object.keys(dayKeys).sort();
+    var notes = [];
+    notes.push(used.toLocaleString() + " events folded into " + rows.length.toLocaleString() + " day records");
+    if (droppedCount) {
+      notes.push("Skipped " + droppedCount.toLocaleString() + " event" + (droppedCount === 1 ? "" : "s") +
+        " that did not authenticate: " + Object.keys(dropped).sort(function (a, b) { return dropped[b] - dropped[a]; })
+          .map(function (reason) { return reason + " (" + dropped[reason].toLocaleString() + ")"; }).join(", "));
+    }
+    if (ignored) notes.push("Ignored " + ignored.toLocaleString() + " events on your instruction");
+    if (fromTerminal) notes.push(fromTerminal.toLocaleString() + " events took their direction from the terminal name");
+    if (undirected) notes.push(undirected.toLocaleString() + " events had no direction at all — read as earliest in, latest out");
+    if (unreadable) notes.push(unreadable.toLocaleString() + " events had an unreadable Event Time");
+    if (nameless) notes.push(nameless.toLocaleString() + " events named nobody");
+    if (strayOut) notes.push(strayOut.toLocaleString() + " day" + (strayOut === 1 ? " has" : "s have") +
+      " a way-out punch before that day's way in — left out of Time Out, and noted on the row");
+    if (filled) notes.push("Added " + filled.toLocaleString() + " row" + (filled === 1 ? "" : "s") + " for days inside an employee's span with no punches");
+
+    return {
+      headers: UBIO_HEADERS.slice(),
+      rows: rows,
+      sheetName: raw.sheetName,
+      titleRows: raw.titleRows,
+      droppedColumns: raw.droppedColumns,
+      splitApplied: false,
+      // Computed here as a decimal span, so it must never be read as H.MM.
+      hoursFormatHint: "decimal",
+      ubio: {
+        events: raw.rows.length,
+        used: used,
+        dropped: dropped,
+        droppedCount: droppedCount,
+        ignored: ignored,
+        unreadable: unreadable,
+        nameless: nameless,
+        fromTerminal: fromTerminal,
+        undirected: undirected,
+        employees: order.length,
+        dayRecords: rows.length,
+        days: covered.length,
+        from: covered[0] || "",
+        to: covered[covered.length - 1] || "",
+        missingIn: missingIn,
+        missingOut: missingOut,
+        splitDays: splitDays,
+        strayOut: strayOut,
+        overnight: overnight,
+        filled: filled,
+        lateDays: lateDays,
+        maxShiftHours: maxShiftMs / 3600000,
+        scheduledIn: schedInText,
+        scheduledOut: schedOutText,
+        weeklyOff: weeklyOff.map(function (d) { return WEEKDAY_NAMES[d]; }),
+        onlySuccess: onlySuccess,
+        notes: notes
+      }
+    };
+  }
+
+  /* ================================================================== *
+   * placeholder report used by the one tab without rules of its own
    * ================================================================== */
 
   function findNumericColumns(headers, rows) {
@@ -3250,7 +3804,6 @@
 
       withBusy(generateBtn, "Summarising…", function () {
         var summary = buildPeriodSummary(state.cleaned, parseKeywords(DEFAULT_DAY_OFF_WORDS));
-        summary.dayOffWords = parseKeywords(DEFAULT_DAY_OFF_WORDS);
         state.summary = summary;
         renderReport();
         renderPreview();
@@ -3771,8 +4324,10 @@
 
   function createPanel(tab) {
     var state = {
-      fileName: "", cleaned: null, model: null, stats: null, report: null, enhanced: null
+      fileName: "", raw: null, cleaned: null, model: null, stats: null, report: null, enhanced: null
     };
+
+    var casualsMode = isCasualsMode(tab.mode);
 
     var panel = el("section", "panel");
     panel.id = "panel-" + tab.id;
@@ -3784,6 +4339,8 @@
     uploadCard.appendChild(el("h2", null, tab.title));
     uploadCard.appendChild(el("p", "sub", tab.mode === "casuals"
       ? "Upload the casual employees timesheet (.xlsx or .xls). The first sheet is read, cleaned and turned into a payroll-ready report."
+      : tab.mode === "ubio"
+      ? "Upload the access log exported by Ubio (.xlsx or .xls). Its events are folded into one row per employee per day, laid out exactly like the Casuals Detailed Report."
       : "Upload an Excel workbook (.xlsx or .xls). The first sheet is read."));
 
     var drop = el("div", "drop");
@@ -3825,11 +4382,100 @@
     uploadCard.appendChild(actions);
     panel.appendChild(uploadCard);
 
-    /* ---- mapping (casuals only) ---- */
+    /* ---- the Ubio fold (Ubio tab only) ---- */
+    var ubioCard, ubioKeyBox, ubioNotes, ubioAlert, shiftInput, schedInInput, schedOutInput,
+        weeklyOffInput, successCheck, fillCheck;
+    var ubioSelects = [];
+
+    if (tab.mode === "ubio") {
+      ubioCard = el("div", "card");
+      ubioCard.hidden = true;
+      ubioCard.appendChild(el("h2", null, "Access log → attendance"));
+      ubioCard.appendChild(el("p", "sub", "F1 is a way in and F3 a way out. Every other Function Key found in " +
+        "your file is listed below with what it was taken to mean — change anything that is wrong."));
+
+      var ubioFields = el("div", "fields");
+
+      function ubioField(labelText, control, hint) {
+        var wrapper = el("div", "field");
+        var label = el("label", null, labelText);
+        label.htmlFor = control.id;
+        wrapper.appendChild(label);
+        wrapper.appendChild(control);
+        if (hint) wrapper.appendChild(el("span", "hint", hint));
+        ubioFields.appendChild(wrapper);
+        return control;
+      }
+
+      shiftInput = el("input");
+      shiftInput.id = "shift-" + tab.id;
+      shiftInput.type = "number";
+      shiftInput.min = "1";
+      shiftInput.step = "1";
+      shiftInput.value = String(UBIO_MAX_SHIFT_HOURS);
+      ubioField("Longest shift (hours)", shiftInput, "A way-out punch further than this starts its own record.");
+
+      schedInInput = el("input");
+      schedInInput.id = "schedin-" + tab.id;
+      schedInInput.type = "text";
+      schedInInput.placeholder = "e.g. 07:00 — leave empty";
+      ubioField("Scheduled In", schedInInput, "Applies to every row, so fill it only where one shift fits all.");
+
+      schedOutInput = el("input");
+      schedOutInput.id = "schedout-" + tab.id;
+      schedOutInput.type = "text";
+      schedOutInput.placeholder = "e.g. 19:00 — leave empty";
+      ubioField("Scheduled Out", schedOutInput, "Used for the Early Going column only.");
+
+      weeklyOffInput = el("input");
+      weeklyOffInput.id = "weekoff-" + tab.id;
+      weeklyOffInput.type = "text";
+      weeklyOffInput.placeholder = "e.g. friday, saturday";
+      ubioField("Weekly off days", weeklyOffInput, "Stamped as “Weekly Off” in Status, which is what earns OT.");
+
+      var checks = el("div", "field");
+      checks.appendChild(el("label", null, "Events"));
+
+      function checkbox(labelText, checked) {
+        var line = el("label", "check");
+        var box = el("input");
+        box.type = "checkbox";
+        box.checked = checked;
+        line.appendChild(box);
+        line.appendChild(el("span", null, labelText));
+        checks.appendChild(line);
+        return box;
+      }
+
+      successCheck = checkbox("Successful authentications only", true);
+      fillCheck = checkbox("Add a row for days with no punches", false);
+      ubioFields.appendChild(checks);
+
+      ubioCard.appendChild(ubioFields);
+
+      ubioKeyBox = el("div", "keymap");
+      ubioCard.appendChild(ubioKeyBox);
+
+      ubioAlert = el("div", "alert warn");
+      ubioCard.appendChild(ubioAlert);
+
+      ubioNotes = el("ul", "notes");
+      ubioCard.appendChild(ubioNotes);
+      panel.appendChild(ubioCard);
+
+      [shiftInput, schedInInput, schedOutInput, weeklyOffInput].forEach(function (control) {
+        control.addEventListener("change", function () { if (state.raw) applyUbioFold(); });
+      });
+      [successCheck, fillCheck].forEach(function (control) {
+        control.addEventListener("change", function () { if (state.raw) applyUbioFold(); });
+      });
+    }
+
+    /* ---- mapping (casuals and Ubio) ---- */
     var mappingCard, dateSelect, hoursSelect, statusSelect, requiredInput, dayOffInput,
         lateSelect, graceInput, hoursFormatSelect, cleanupNotes, mappingAlert, statusPreview;
 
-    if (tab.mode === "casuals") {
+    if (casualsMode) {
       mappingCard = el("div", "card");
       mappingCard.hidden = true;
       mappingCard.appendChild(el("h2", null, "Cleanup & column mapping"));
@@ -3928,7 +4574,7 @@
     /* ---- report ---- */
     var reportCard = el("div", "card");
     reportCard.appendChild(el("h2", null, "Report"));
-    reportCard.appendChild(el("p", "sub", tab.mode === "casuals"
+    reportCard.appendChild(el("p", "sub", casualsMode
       ? "Attendance and payroll overview for the uploaded period."
       : "Summary statistics for every numeric column."));
     var reportBody = el("div");
@@ -4212,6 +4858,98 @@
       }
     }
 
+    /* ---- the Ubio fold ---- */
+
+    function renderUbioControls() {
+      ubioKeyBox.innerHTML = "";
+      ubioSelects = [];
+
+      var tally = ubioKeyTally(state.raw);
+      ubioKeyBox.appendChild(el("h3", null, "Function keys in this file"));
+
+      tally.forEach(function (entry) {
+        var row = el("div", "keyrow");
+        row.appendChild(el("span", "keyname", entry.key));
+        row.appendChild(el("span", "keycount", entry.count.toLocaleString() + " events"));
+
+        var select = el("select");
+        select.id = "fnkey-" + tab.id + "-" + slugify(entry.key);
+        UBIO_DIRECTION_LABELS.forEach(function (pair) {
+          var option = el("option", null, pair[1]);
+          option.value = pair[0];
+          select.appendChild(option);
+        });
+        select.value = entry.direction;
+        select.addEventListener("change", function () { if (state.raw) applyUbioFold(); });
+
+        row.appendChild(select);
+        ubioKeyBox.appendChild(row);
+        ubioSelects.push({ key: entry.key.toLowerCase(), select: select });
+      });
+
+      ubioCard.hidden = false;
+    }
+
+    function readUbioOptions() {
+      var directions = {};
+      ubioSelects.forEach(function (entry) { directions[entry.key] = entry.select.value; });
+
+      return {
+        directions: directions,
+        maxShiftHours: parseFloat(shiftInput.value) || UBIO_MAX_SHIFT_HOURS,
+        scheduledIn: schedInInput.value,
+        scheduledOut: schedOutInput.value,
+        weeklyOff: parseWeekdays(weeklyOffInput.value),
+        onlySuccess: successCheck.checked,
+        fillGaps: fillCheck.checked
+      };
+    }
+
+    function applyUbioFold() {
+      try {
+        state.cleaned = buildUbioAttendance(state.raw, readUbioOptions());
+      } catch (error) {
+        ubioAlert.className = "alert warn show";
+        ubioAlert.textContent = error.message || String(error);
+        return;
+      }
+
+      state.model = null;
+      state.stats = null;
+      downloadBtn.disabled = true;
+
+      var fold = state.cleaned.ubio;
+      ubioNotes.innerHTML = "";
+      fold.notes.forEach(function (note) { ubioNotes.appendChild(el("li", null, note)); });
+      if (fold.from) {
+        ubioNotes.appendChild(el("li", null, "Period " + fold.from + " to " + fold.to +
+          " — " + fold.employees.toLocaleString() + " employees over " + fold.days.toLocaleString() + " days"));
+      }
+      if (fold.overnight) {
+        ubioNotes.appendChild(el("li", null, fold.overnight.toLocaleString() +
+          " day" + (fold.overnight === 1 ? "" : "s") + " ran past midnight — kept on the day the shift started"));
+      }
+      if (fold.splitDays) {
+        ubioNotes.appendChild(el("li", null, fold.splitDays.toLocaleString() +
+          " day" + (fold.splitDays === 1 ? "" : "s") + " had more than one shift — earliest way in, latest way out"));
+      }
+
+      var warnings = [];
+      if (fold.missingOut) warnings.push(fold.missingOut.toLocaleString() + " days have a way in but no way out");
+      if (fold.missingIn) warnings.push(fold.missingIn.toLocaleString() + " days have a way out but no way in");
+      if (warnings.length) {
+        ubioAlert.className = "alert warn show";
+        ubioAlert.textContent = warnings.join(", ") + ". Those rows carry no Total Hours, so they pay nothing " +
+          "until a punch is filled in — they are flagged in the Status and Note columns.";
+      } else {
+        ubioAlert.className = "alert warn";
+        ubioAlert.textContent = "";
+      }
+
+      renderMapping();
+      renderBasicPreview();
+    }
+
     function renderMapping() {
       var cleaned = state.cleaned;
       var dateIndex = detectDateColumn(cleaned.headers, cleaned.rows);
@@ -4223,10 +4961,15 @@
       fillSelect(hoursSelect, cleaned.headers, hoursIndex, true);
       fillSelect(statusSelect, cleaned.headers, statusIndex, true);
       fillSelect(lateSelect, cleaned.headers, lateIndex, true);
-      hoursFormatSelect.value = detectHoursFormat(cleaned.rows, hoursIndex);
+      hoursFormatSelect.value = cleaned.hoursFormatHint || detectHoursFormat(cleaned.rows, hoursIndex);
 
       cleanupNotes.innerHTML = "";
       var notes = [];
+      if (cleaned.ubio) {
+        notes.push("Built from the Ubio access log: " + cleaned.ubio.used.toLocaleString() + " events → " +
+          cleaned.rows.length.toLocaleString() + " day records");
+        notes.push("Total Hours is the span from the first way-in punch to the last way-out punch");
+      }
       if (cleaned.titleRows) notes.push("Removed " + cleaned.titleRows + " title row" + (cleaned.titleRows === 1 ? "" : "s") + " above the header");
       if (cleaned.droppedColumns) notes.push("Removed " + cleaned.droppedColumns + " empty column" + (cleaned.droppedColumns === 1 ? "" : "s"));
       notes.push("Merged cells flattened");
@@ -4305,7 +5048,8 @@
         requiredHours: parseFloat(requiredInput.value) || 0,
         lateGrace: Math.max(0, parseFloat(graceInput.value) || 0),
         hoursFormat: hoursFormatSelect.value,
-        dayOffWords: dayOffInput.value
+        dayOffWords: dayOffInput.value,
+        sheetTitle: tab.mode === "ubio" ? "Ubio Detailed Report" : "Casuals Detailed Report"
       };
     }
 
@@ -4331,6 +5075,7 @@
 
       readWorkbook(file).then(function (cleaned) {
         state.fileName = file.name;
+        state.raw = cleaned;
         state.cleaned = cleaned;
         state.model = null;
         state.stats = null;
@@ -4339,10 +5084,24 @@
         fileMeta.textContent = formatBytes(file.size) + " · " + cleaned.rows.length +
           " rows · " + cleaned.headers.length + " columns";
 
+        if (tab.mode === "ubio") {
+          if (!looksLikeUbio(cleaned.headers)) {
+            throw new Error("“" + file.name + "” has no Event Time and Function Key columns, so it is not a Ubio " +
+              "access log. Found instead: " + cleaned.headers.slice(0, 8).join(", ") + ".");
+          }
+          renderUbioControls();
+          applyUbioFold();
+          generateBtn.disabled = false;
+          downloadBtn.disabled = true;
+          reportBody.innerHTML = "";
+          reportBody.appendChild(el("div", "empty", "Generate a report to see the summary."));
+          return;
+        }
+
         generateBtn.disabled = false;
         downloadBtn.disabled = true;
 
-        if (tab.mode === "casuals") renderMapping();
+        if (casualsMode) renderMapping();
         renderBasicPreview();
         reportBody.innerHTML = "";
         reportBody.appendChild(el("div", "empty", "Generate a report to see the summary."));
@@ -4409,7 +5168,7 @@
       clearError();
 
       withBusy(generateBtn, "Generating…", function () {
-        if (tab.mode === "casuals") {
+        if (casualsMode) {
           state.model = buildCasualsModel(state.cleaned, readMapping());
           state.stats = summariseCasuals(state.model, state.cleaned);
           renderCasualsPreview();
@@ -4424,12 +5183,12 @@
     });
 
     downloadBtn.addEventListener("click", function () {
-      if (tab.mode === "casuals" ? !state.model : !state.report) return;
+      if (casualsMode ? !state.model : !state.report) return;
       clearError();
 
       withBusy(downloadBtn, "Building file…", function () {
         var meta = { fileName: state.fileName, sheetName: state.cleaned.sheetName };
-        var workbook = tab.mode === "casuals"
+        var workbook = casualsMode
           ? buildCasualsWorkbook(state.model, state.stats, meta)
           : buildBasicWorkbook(tab, state.cleaned, state.report, meta);
 

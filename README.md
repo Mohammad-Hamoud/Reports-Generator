@@ -15,6 +15,7 @@ Libraries loaded from CDN:
 2. **FTE Detailed Report** — Report Merge: four system exports into one attendance file
 3. **Casual Period Summary** — rolls the detailed report up per employee and per supplier
 4. **FTE Period Summary** — generic placeholder summary
+5. **Ubio** — folds the Ubio access log into the same report as tab 1
 
 Each tab is independent: it keeps its own uploaded file, preview and generated report.
 
@@ -247,6 +248,95 @@ Only genuinely equal codes collapse:
 
 Every collapse is listed on screen and in an audit block on the `Suppliers` sheet, naming
 the code that was kept and the one it absorbed.
+
+## Ubio
+
+The Ubio platform exports an **access log**: one row per face or fingerprint
+authentication, with who, when, which terminal, and a `Function Key` saying which way the
+person went. This tab folds that log into **one row per employee per day** and then runs
+it through the very same pipeline as the Casuals Detailed Report — same columns, same
+payroll chain, same styling, same two sheets. The output also drops straight into the
+**Casual Period Summary** tab.
+
+### Which way did they go
+
+`F1` is a way in and `F3` a way out. The same export spells the door differently at other
+sites, so the rest are recognised too, and **every Function Key found in your file is
+listed on screen with what it was taken to mean** — change any of them before generating.
+
+| Key | Read as | Where it appears |
+| --- | --- | --- |
+| `F1`, `F4` | way in | `F4` stands in for `F1` at Riyadh WO and SBC Jeddah Depo |
+| `F3`, `F2` | way out | `F2` stands in for `F3` at AOU-ZBC, IFI Factory Security, SBC Office |
+| `Attend` | way in | the TNA terminals (IFI Factory Admin, Warehouse Loading Area) |
+| `Leave`, `Out` | way out | the TNA terminals |
+| `Access` | from the terminal name | the turnstiles and the branch offices |
+
+A plain `Access` carries no direction, so the **terminal's own name** is read instead —
+`AIC - Turnstile -02 (Out)` against `AIC - Turnstile -01 (In - meddle)`. The word has to
+stand alone, so `IFI - Factory Admin` is not read as a way in. Where the name says nothing
+either (Dammam HO, Al Hassa, Tabuk…), the day is taken as **earliest punch in, latest
+punch out**.
+
+A punch that did not authenticate is not a punch — `Authentication Failed`, `Duplicate`,
+`Capture Failed` and `Invalid User` rows are left out, and the counts are reported.
+
+### Stitching the punches into days
+
+Each employee's events are walked in time order. A way in opens a shift, a way out closes
+it, and a later way out replaces an earlier one, so **a shift that runs past midnight
+stays one record dated on the day it started** — a 20:00 → 06:30 night shift is 10.5 hours
+on the first day, not two broken halves. A way out further than the **longest shift**
+(16 hours by default) from the open way in starts its own record instead, so one missing
+punch cannot swallow days of absence.
+
+Nothing is dropped silently:
+
+| Situation | What the row says |
+| --- | --- |
+| both punches | `Present`, with `Total Hours` |
+| way in, no way out | `Missing Out`, no hours — pays nothing until a punch is filled in |
+| way out, no way in | `Missing In`, no hours |
+| more than one shift that day | `Present`, noted as “N shifts” — earliest in, latest out |
+| a way out *before* that day's way in | kept out of `Time Out` and noted on the row |
+
+That last one matters: it closes a shift that opened before the file begins, and pairing
+it with a later way in would read as negative hours.
+
+`Total Hours` is the span from the first way-in punch to the last way-out punch, which is
+what TAS reports too — so a break between two shifts counts as worked time, and the
+`Early arrival` rule above still applies.
+
+### What you can set
+
+| Control | Default | What it does |
+| --- | --- | --- |
+| Longest shift (hours) | 16 | A way out further than this starts its own record |
+| Scheduled In | empty | Fills the column, which is what `Late Coming` and `Early Arrival` are measured against |
+| Scheduled Out | empty | Fills the column, used for `Early Going` |
+| Weekly off days | none | e.g. `friday, saturday` — stamped as `Weekly Off` in `Status` |
+| Successful authentications only | on | Leaves out the failed reads |
+| Add a row for days with no punches | off | Fills an employee's own span with `Absent` rows |
+
+An access log carries **no schedule**, so `Scheduled In` is empty by default and no
+lateness is assumed. Filling it applies that one shift to every row, which suits a
+single-shift population — this file holds both day and night shifts, so a 07:00 start
+would mark every night worker eight hours late.
+
+`Status` is punch-derived, so no day is a day off until you say which weekday is. Setting
+**Weekly off days** is what makes `Day Off?` read `Yes`, which in turn is what pays the
+full daily salary and earns the 1.5× overtime.
+
+Days with no punches are **not** invented by default — an access log only knows the days
+someone appeared. Turning the option on fills the gaps inside each employee's *own* first
+and last punch, never before they first appear or after they last do.
+
+### Employee identity
+
+`Unique ID` is the employee code — the terminal's `User ID` is usually a truncation of it
+(`C2577493725` against `77493725`), so it is kept alongside as `Device User ID` and never
+used for grouping. Codes are grouped exactly the way Excel's own matching groups them, so
+`C2480440946` and `2480440946` stay **two employees**.
 
 ## Other tab
 
