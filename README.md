@@ -52,7 +52,7 @@ editable controls before the report is generated.
 | Late Minutes | calculated | Lateness read from the Late Coming column, in minutes |
 | Early Arrival (min) | calculated | Minutes clocked before the shift was due to start |
 | Late Grace (min) | calculated | The allowance, `15` by default |
-| Paid Hours | formula | Worked hours, less the early arrival, plus the late minutes the grace forgives |
+| Paid Hours | formula | Worked hours, less the early arrival, plus the late minutes the grace forgives. A day off nobody worked is credited the full requirement |
 | Hours Completion % | formula | `Paid Hours ÷ Required Hours`, uncapped so you can see overtime days |
 | Monthly Salary | **you fill in** | Left empty on purpose |
 | Days in Month | formula | `DAY(EOMONTH(date,0))` → 28/29/30/31 |
@@ -72,10 +72,31 @@ editable controls before the report is generated.
 The formulas are written as real Excel formulas, so the whole chain recalculates the
 moment a monthly salary, incentive or deduction is typed into the downloaded file.
 
-A working day with no recorded hours counts as 0% completion, which pays 0 for that day. A
-**day off always pays the full daily salary**, whether the employee worked it or not — the
+A working day with no recorded hours counts as 0% completion, which pays 0 for that day.
+
+### Days off
+
+A **day off always pays the full daily salary**, whether the employee worked it or not. The
 hours worked on a day off are compensated separately as overtime, so the cap trims nothing
-there and `Excess Above Cap` stays 0.
+there and `Excess Above Cap` stays 0. The two cases differ only in what the row shows:
+
+| | Paid Hours | Completion % | Payment for Day | OT |
+| --- | --- | --- | --- | --- |
+| **not worked** | the full `Required Hours` | **100%** | full daily salary | none — no hours were worked |
+| **worked** | the hours actually worked | what was actually worked | full daily salary | `1.5 × MIN(hours, required)` |
+
+A day off nobody worked is paid as a full day, so it is credited the full requirement and
+**reads 100% complete, as if present** — not 0%, which would make a paid day look like an
+unpaid absence, colour the row red and drag the average completion down. A day off that
+*was* worked is untouched: its completion shows what was really worked, above or below
+100%, and its overtime is calculated from those same hours.
+
+A genuine absence on a working day is unaffected — `Absent` is not a day-off word, so the
+row still reads 0% and pays nothing.
+
+`Total Hours` keeps reporting what was actually worked in both cases, so the credited day
+never hides the real attendance. The count of days off paid without being worked is shown
+on screen and on the `Summary` sheet.
 
 The `Cost Center` column is skipped when the uploaded sheet already has a cost
 centre/center column of its own, so no duplicate is added.

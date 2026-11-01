@@ -904,24 +904,22 @@
     return false;
   }
 
-  // The uploaded sheet may already carry a cost centre, in which case adding a
-  // second empty one would only confuse things.
   /* The payroll expressions, shared by the detailed report and the per-supplier
    * attendance sheets so both always carry identical rules. Each takes a map of
    * column letters, the row number, and returns an expression — never a whole
    * formula — so the caller controls the surrounding guard. */
 
   /**
-   * Worked hours, converted out of H.MM when that is the convention, plus the
-   * late minutes the grace forgives. Going one minute past the grace forfeits
-   * the whole allowance, which is the rule as asked for.
-   */
-  /**
    * Worked hours, converted out of H.MM when that is the convention, minus the
    * minutes clocked before the shift was due to start, plus the late minutes the
    * grace forgives. Going one minute past the grace forfeits the whole
    * allowance, which is the rule as asked for. Dropping the early arrival is
    * what stops it paying for an early departure later the same day.
+   *
+   * A day off nobody worked is the exception: it is paid as a full day, so it
+   * is credited the full requirement and reads 100% complete, as if present,
+   * instead of looking like an unpaid absence. A day off that *was* worked
+   * keeps its real hours, and with them its completion and its overtime.
    */
   function paidHoursExpression(L, row, hoursLetter, hoursFormat) {
     if (!hoursLetter) return "\"\"";
@@ -934,7 +932,13 @@
         L.lateMin + row + ",0)/60"
       : "0";
     var earlyIn = L.earlyIn ? L.earlyIn + row + "/60" : "0";
-    return "MAX(0,IF(ISNUMBER(" + cell + ")," + worked + ",0)-" + earlyIn + "+" + excused + ")";
+    var credited = "MAX(0,IF(ISNUMBER(" + cell + ")," + worked + ",0)-" + earlyIn + "+" + excused + ")";
+
+    if (!L.dayOff || !L.required) return credited;
+
+    var unworked = "OR(NOT(ISNUMBER(" + cell + "))," + cell + "=0)";
+    return "IF(AND(" + L.dayOff + row + "=\"Yes\"," + unworked + ")," +
+      L.required + row + "," + credited + ")";
   }
 
   function paymentExpression(L, row, hasDayOff) {
@@ -1022,7 +1026,12 @@
       // make up for leaving early later the same day.
       var earlyIn = schedInIndex >= 0 && timeInIndex >= 0
         ? earlyArrivalMinutes(row[schedInIndex], row[timeInIndex]) : 0;
-      var paidHours = Math.max(0, hours - earlyIn / 60 + excused / 60);
+      // A day off nobody worked is paid as a full day, so it is credited the
+      // full requirement rather than counted as an absence.
+      var unworkedDayOff = dayOff && hoursIndex >= 0 && hours === 0;
+      var paidHours = unworkedDayOff
+        ? required
+        : Math.max(0, hours - earlyIn / 60 + excused / 60);
       var pct = required > 0 ? paidHours / required : null;
 
       return {
@@ -1036,6 +1045,7 @@
         excused: excused,
         date: date,
         dayOff: dayOff,
+        unworkedDayOff: unworkedDayOff,
         // Hours are capped at the daily requirement before the OT multiplier.
         otHours: dayOff && hours > 0 ? OT_MULTIPLIER * Math.min(hours, required) : null
       };
@@ -1069,7 +1079,7 @@
     var statusIndex = model.statusIndex >= 0 ? model.statusIndex : findColumn(model.headers, [/^status$/i]);
 
     var employees = {}, days = {}, totalHours = 0, pctSum = 0, pctCount = 0;
-    var below = 0, above = 0, absent = 0, otHours = 0, otDays = 0;
+    var below = 0, above = 0, absent = 0, otHours = 0, otDays = 0, paidDaysOff = 0;
 
     model.rows.forEach(function (row, index) {
       var info = model.computed[index];
@@ -1086,6 +1096,7 @@
         otHours += info.otHours;
         otDays++;
       }
+      if (info.unworkedDayOff) paidDaysOff++;
       if (statusIndex >= 0 && /absent/i.test(String(row[statusIndex]))) absent++;
     });
 
@@ -1104,6 +1115,7 @@
       absentDays: absent,
       otHours: otHours,
       otDays: otDays,
+      paidDaysOff: paidDaysOff,
       droppedColumns: cleaned.droppedColumns,
       titleRows: cleaned.titleRows
     };
@@ -1353,6 +1365,7 @@
     line("Days above target", stats.aboveTarget);
     line("Absent days", stats.absentDays);
     line("Day-off shifts worked", stats.otDays);
+    line("Days off not worked, paid in full", stats.paidDaysOff);
     line("OT hours (before manual)", stats.otHours, "0.00");
 
     sheet.addRow([]);
@@ -1423,6 +1436,10 @@
     line("Early arrival", "Never paid, and never offsets leaving early later the same day.");
     line("Payment cap", "Payment for Day never exceeds Daily Salary.");
     line("Day off pay", "A day off pays the full Daily Salary, worked or not.");
+    line("Day off not worked", "Credited the full Required Hours, so it reads 100% complete and pays " +
+      "a full day, as if present. No overtime, because no hours were worked.");
+    line("Day off worked", "Keeps its real hours, so the completion shows what was actually worked " +
+      "and the overtime is calculated from it.");
     line("Excess Above Cap", "Daily Salary x (Completion % - 100%), when over 100%. Zero on a day off.");
     line("Day Off? words", model.dayOffWords.join(", "));
     line("OT trigger", "Day Off? is Yes and a number of hours was recorded.");
@@ -1608,26 +1625,30 @@
       var required = numberAt(row, cols.required);
       if (required === null) required = DEFAULT_REQUIRED_HOURS;
 
+      // Trust a literal Yes/No if the report carries one; otherwise re-derive.
+      var dayOffCell = textAt(row, cols.dayOff);
+      var dayOff = /^yes$/i.test(dayOffCell) ? true
+        : /^no$/i.test(dayOffCell) ? false
+        : isDayOff(status, dayOffWords);
+
       // Paid Hours is a formula in the uploaded report and carries no cached
-      // result, so it is rebuilt here from the values it was derived from.
+      // result, so it is rebuilt here from the values it was derived from —
+      // including the full day credited to a day off nobody worked.
       var lateMinutes = numberAt(row, cols.lateMin) || 0;
       var grace = numberAt(row, cols.lateGrace);
       if (grace === null) grace = DEFAULT_LATE_GRACE_MINUTES;
       var excused = lateMinutes > 0 && lateMinutes <= grace ? lateMinutes : 0;
       var earlyIn = numberAt(row, cols.earlyIn) || 0;
-      var paidHours = Math.max(0, hours - earlyIn / 60 + excused / 60);
+      var unworkedDayOff = dayOff && cols.hours !== undefined && hours === 0;
+      var paidHours = unworkedDayOff
+        ? required
+        : Math.max(0, hours - earlyIn / 60 + excused / 60);
       var monthly = numberAt(row, cols.monthly);
       if (monthly === null) monthlyMissing++;
 
       var days = date ? daysInMonth(date) : numberAt(row, cols.days);
       var daily = monthly !== null && days ? monthly / days : null;
       var pct = required > 0 ? paidHours / required : null;
-
-      // Trust a literal Yes/No if the report carries one; otherwise re-derive.
-      var dayOffCell = textAt(row, cols.dayOff);
-      var dayOff = /^yes$/i.test(dayOffCell) ? true
-        : /^no$/i.test(dayOffCell) ? false
-        : isDayOff(status, dayOffWords);
 
       // A day off pays the full day however many hours were worked on it.
       var payment = daily === null || pct === null ? 0
@@ -4870,6 +4891,7 @@
         ["Avg completion", stats.averagePct === null ? "—" : (stats.averagePct * 100).toFixed(1) + "%"],
         ["Days below target", stats.belowTarget.toLocaleString()],
         ["Day-off shifts worked", stats.otDays.toLocaleString()],
+        ["Days off paid in full", stats.paidDaysOff.toLocaleString()],
         ["OT hours", formatNumber(stats.otHours, 2)]
       ]));
 
