@@ -63,7 +63,8 @@ editable controls before the report is generated.
 | OT Hours | formula | On a worked day off: `1.5 × MIN(Total Hours, Required Hours)` |
 | Manual OT Hours | **you fill in** | Overrides OT Hours on any row when it is not empty |
 | OT Hour Value (SAR) | **you fill in** | Overrides the OT rate for that row |
-| OT Pay | formula | `OT Hours × OT rate` |
+| Day Off Full-Day OT (SAR) | **you fill in** | A flat amount for a fully worked day off, prorated by that day's completion |
+| OT Pay | formula | See **Overtime** below — three ways to value the day |
 | Incentive (+) | **you fill in** | Added to the day's payment |
 | Deduction (-) | **you fill in** | Subtracted from the day's payment |
 | Adjustment Note | **you fill in** | Why the incentive or deduction was applied |
@@ -159,6 +160,35 @@ OT rate = Monthly Salary ÷ 30 ÷ Required Hours per day
 
 `OT Hour Value (SAR)` overrides that rate for its row. Filled in alongside `Manual OT
 Hours`, `OT Pay` is simply the two multiplied. Left empty, the 30-day rate applies.
+
+**A flat amount per day off** — some casuals are paid an agreed lump sum for working a day
+off rather than an hourly rate: 120 for one, 140 for another. Type that amount into **`Day
+Off Full-Day OT (SAR)`** on the day-off row and it is paid **in proportion to how much of
+that day was worked**, which is the `Hours Completion %` of that row:
+
+| Worked on the day off | Completion | Box says 120 | Box says 140 |
+| --- | --- | --- | --- |
+| 12 of 12 hours | 100% | **120.00** | **140.00** |
+| 9 hours | 75% | 90.00 | 105.00 |
+| 6 hours | 50% | **60.00** | **70.00** |
+| 3 hours | 25% | 30.00 | 35.00 |
+| 14 hours | 116.7% | 120.00 — capped at one full day | 140.00 |
+| nothing | — | nothing: no hours, no overtime | nothing |
+
+The amount is what a *full* day off is worth, so it is capped at one full day the same way
+`Payment for Day` is capped at one daily salary. It needs no `Monthly Salary` — the figure
+is the pay, not a rate to multiply. It only applies on a row where `Day Off?` is `Yes`, so
+a value typed on an ordinary working day by mistake changes nothing. And because `OT Pay`
+only exists where `OT Hours` does, a day off nobody worked still earns no overtime however
+the box is filled.
+
+**So `OT Pay` is valued in one of three ways**, in order of how explicit they are:
+
+| | When | OT Pay |
+| --- | --- | --- |
+| 1 | `OT Hour Value (SAR)` filled | `OT Hours × OT Hour Value` |
+| 2 | `Day Off Full-Day OT (SAR)` filled on a day off | `amount × MIN(Completion %, 100%)` |
+| 3 | otherwise | `OT Hours × Monthly Salary ÷ 30 ÷ Required Hours` |
 
 With a 3,100 monthly salary and a 12-hour day, the daily salary in July is `3100 ÷ 31 =
 100.00` while the OT rate is `3100 ÷ 30 ÷ 12 = 8.61` — the two deliberately use different

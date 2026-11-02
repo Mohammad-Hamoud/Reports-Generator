@@ -873,6 +873,7 @@
     { key: "otHours",    title: "OT Hours",              role: CALC,  format: "0.00" },
     { key: "manualOt",   title: "Manual OT Hours",       role: INPUT, format: "0.00" },
     { key: "otValue",    title: "OT Hour Value (SAR)",   role: INPUT, format: "#,##0.00" },
+    { key: "dayOffOt",   title: "Day Off Full-Day OT (SAR)", role: INPUT, format: "#,##0.00" },
     { key: "otPay",      title: "OT Pay",                role: CALC,  format: "#,##0.00" },
     { key: "incentive",  title: "Incentive (+)",         role: INPUT, format: "#,##0.00" },
     { key: "deduction",  title: "Deduction (-)",         role: INPUT, format: "#,##0.00" },
@@ -955,9 +956,31 @@
 
   // Overtime is valued at the monthly salary over a fixed 30-day month divided by
   // the required hours per day — unless an hour value was typed in, which wins.
+  /**
+   * Three ways to value a day's overtime, in order of how explicit they are.
+   *
+   *  1. OT Hour Value — an hourly rate typed in for this row: hours x rate.
+   *  2. Day Off Full-Day OT — a flat amount agreed for a fully worked day off,
+   *     paid in proportion to how much of that day was actually worked: 120
+   *     with 12 of 12 hours pays 120, with 6 pays 60. Capped at one full day,
+   *     the same way Payment for Day is capped at one daily salary.
+   *  3. Otherwise the hours are valued at the monthly rate over a 30-day month.
+   *
+   * The caller wraps this in a test on OT Hours, which is blank unless overtime
+   * was actually earned — so a day off nobody worked pays nothing here however
+   * the columns are filled.
+   */
   function otPayExpression(L, row) {
     var atRate = "IF(OR(" + L.monthly + row + "=\"\"," + L.required + row + "=0),\"\"," +
       L.otHours + row + "*(" + L.monthly + row + "/" + OT_MONTH_DAYS + ")/" + L.required + row + ")";
+
+    if (L.dayOffOt && L.pct) {
+      var flat = L.dayOffOt + row + "*MIN(" + L.pct + row + ",1)";
+      atRate = L.dayOff
+        ? "IF(AND(" + L.dayOff + row + "=\"Yes\"," + L.dayOffOt + row + "<>\"\")," + flat + "," + atRate + ")"
+        : "IF(" + L.dayOffOt + row + "<>\"\"," + flat + "," + atRate + ")";
+    }
+
     if (!L.otValue) return atRate;
     return "IF(" + L.otValue + row + "<>\"\"," + L.otHours + row + "*" + L.otValue + row + "," + atRate + ")";
   }
@@ -1268,6 +1291,7 @@
         otHours: otHours,
         manualOt: null,                 // filled in by the user
         otValue: null,                  // filled in by the user — overrides the rate
+        dayOffOt: null,                 // filled in by the user on a day off — a flat day amount
         otPay: { formula: "IF(" + letters.otHours + r + "=\"\",\"\"," +
           otPayExpression(letters, r) + ")" },
         incentive: null,
@@ -1447,6 +1471,9 @@
     line("OT rate", "Monthly Salary / " + OT_MONTH_DAYS + " days / Required Hours per day.");
     line("Manual OT Hours", "Overrides the calculated OT Hours on any row.");
     line("OT Hour Value (SAR)", "Overrides the OT rate. With Manual OT Hours, OT Pay is the two multiplied.");
+    line("Day Off Full-Day OT", "A flat amount for a fully worked day off, paid in proportion to that " +
+      "day's completion: 120 with 12 of 12 hours pays 120, with 6 hours pays 60. Capped at one full day.");
+    line("OT Pay order", "OT Hour Value first, then Day Off Full-Day OT, then the 30-day monthly rate.");
 
     sheet.addRow([]);
     section("How to use");
@@ -1493,6 +1520,7 @@
     { key: "otHours",    patterns: [/^ot\s*hours$/i] },
     { key: "manualOt",   patterns: [/manual\s*ot/i] },
     { key: "otValue",    patterns: [/ot\s*hour\s*value/i, /ot\s*rate/i] },
+    { key: "dayOffOt",   patterns: [/day\s*off\s*full[\s-]*day\s*ot/i, /full[\s-]*day\s*ot/i] },
     { key: "otPay",      patterns: [/^ot\s*pay$/i] },
     { key: "incentive",  patterns: [/incentive/i] },
     { key: "deduction",  patterns: [/deduction/i] },
@@ -1510,7 +1538,8 @@
     date: "dd-mmm-yyyy", hours: "0.00", required: "0.00", pct: "0.0%",
     monthly: "#,##0.00", days: "0", daily: "#,##0.00", payment: "#,##0.00",
     lateMin: "0", earlyIn: "0", lateGrace: "0", paidHours: "0.00",
-    excess: "#,##0.00", otHours: "0.00", manualOt: "0.00", otValue: "#,##0.00", otPay: "#,##0.00",
+    excess: "#,##0.00", otHours: "0.00", manualOt: "0.00", otValue: "#,##0.00",
+    dayOffOt: "#,##0.00", otPay: "#,##0.00",
     incentive: "#,##0.00", deduction: "#,##0.00", net: "#,##0.00"
   };
 
@@ -1659,10 +1688,19 @@
       var otHours = manualOt !== null ? manualOt
         : (dayOff && hours > 0 ? OT_MULTIPLIER * Math.min(hours, required) : 0);
 
+      // Mirrors the OT Pay formula: an hourly rate typed in for the row wins,
+      // then a flat day-off amount prorated by that day's completion, then the
+      // monthly rate over a 30-day month. All of it only once overtime exists.
       var otValue = numberAt(row, cols.otValue);
-      var otRate = otValue !== null ? otValue
-        : (monthly !== null && required > 0 ? (monthly / OT_MONTH_DAYS) / required : null);
-      var otPay = otRate === null ? 0 : otHours * otRate;
+      var dayOffOt = numberAt(row, cols.dayOffOt);
+      var otRate = monthly !== null && required > 0 ? (monthly / OT_MONTH_DAYS) / required : null;
+
+      var otPay = 0;
+      if (otHours !== 0) {
+        if (otValue !== null) otPay = otHours * otValue;
+        else if (dayOff && dayOffOt !== null && pct !== null) otPay = dayOffOt * Math.min(pct, 1);
+        else if (otRate !== null) otPay = otHours * otRate;
+      }
 
       var incentive = numberAt(row, cols.incentive) || 0;
       var deduction = numberAt(row, cols.deduction) || 0;
@@ -4812,6 +4850,7 @@
           otHours: info.otHours,
           manualOt: "",
           otValue: "",
+          dayOffOt: "",
           otPay: "",
           incentive: "",
           deduction: "",
